@@ -33,3 +33,4 @@ fun LoginScreen(onLoginSuccess: () -> Unit) {
         }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Zaloguj się") }
     }
 }
+
