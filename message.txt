@@ -46,3 +46,4 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
     var activeFolderName by remember { mutableStateOf("") }
 
     BackHandler(enabled = activeFolderId != null) { activeFolderId = null }
+
