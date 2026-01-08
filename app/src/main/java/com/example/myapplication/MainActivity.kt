@@ -177,5 +177,65 @@ fun LoginScreen(onLoginSuccess: () -> Unit) {
     }
 }
 
+// ==========================================
+// 4. EKRAN GŁÓWNY I WIDOKI
+// ==========================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
+    var selectedTab by remember { mutableIntStateOf(0) }
+    var activeFolderId by remember { mutableStateOf<Int?>(null) }
+    var activeFolderName by remember { mutableStateOf("") }
+
+    BackHandler(enabled = activeFolderId != null) { activeFolderId = null }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    if (activeFolderId != null) Text("Folder: $activeFolderName")
+                    else if (selectedTab == 0) Text("Wszystkie Notatki")
+                    else Text("Moje Foldery")
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                navigationIcon = {
+                    if (activeFolderId != null) {
+                        IconButton(onClick = { activeFolderId = null }) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Wróć")
+                        }
+                    }
+                },
+                actions = { TextButton(onClick = onLogout) { Text("Wyloguj") } }
+            )
+        },
+        bottomBar = {
+            if (activeFolderId == null) {
+                NavigationBar {
+                    NavigationBarItem(icon = { Icon(Icons.Default.Description, contentDescription = null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
+                    NavigationBarItem(icon = { Icon(Icons.Default.Folder, contentDescription = null) }, label = { Text("Foldery") }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
+                }
+            }
+        }
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding)) {
+            if (activeFolderId != null) {
+                NotesView(viewModel, folderId = activeFolderId)
+            } else {
+                when (selectedTab) {
+                    0 -> NotesView(viewModel, folderId = null)
+                    1 -> FoldersView(viewModel, onFolderClick = { folder ->
+                        activeFolderId = folder.id
+                        activeFolderName = folder.name
+                    })
+                }
+            }
+        }
+    }
+}
+
 
 }
