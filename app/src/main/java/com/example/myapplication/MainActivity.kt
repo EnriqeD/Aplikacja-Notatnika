@@ -108,5 +108,38 @@ abstract class AppDatabase : RoomDatabase() {
     }
 }
 
+// ==========================================
+// 2. VIEWMODEL
+// ==========================================
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val dao = AppDatabase.getDatabase(application).dao()
+
+    val allNotes: Flow<List<Note>> = dao.getAllNotes()
+    val allFolders: Flow<List<Folder>> = dao.getAllFolders()
+
+    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> = dao.getNotesByFolder(folderId)
+
+    fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
+        dao.insertNote(Note(title = title, content = content, folderId = folderId, isLocked = false))
+    }
+
+    fun updateNote(id: Int, title: String, content: String) = viewModelScope.launch {
+        dao.updateNoteContent(id, title, content)
+    }
+
+    fun deleteNote(note: Note) = viewModelScope.launch { dao.deleteNote(note) }
+
+    fun moveNote(note: Note, folderId: Int?) = viewModelScope.launch {
+        dao.updateNoteFolder(note.id, folderId)
+    }
+
+    fun toggleLock(note: Note) = viewModelScope.launch {
+        dao.updateNoteLock(note.id, !note.isLocked)
+    }
+
+    fun addFolder(name: String) = viewModelScope.launch { dao.insertFolder(Folder(name = name)) }
+    fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
+}
 
 }
