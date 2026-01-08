@@ -298,6 +298,32 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            // INFORMACJA O FOLDERZE (NOWOŚĆ)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = folderName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                            }
+                        }
+
+                        // IKONY (Prawa strona)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // 1. Szyfrowanie
+                            IconButton(onClick = {
+                                if (note.isLocked) noteToUnlock = note
+                                else { viewModel.toggleLock(note); Toast.makeText(context, "Zablokowano", Toast.LENGTH_SHORT).show() }
+                            }) {
+                                Icon(
+                                    imageVector = if (note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                    contentDescription = "Szyfruj",
+                                    tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                                )
+                            }
 
 
 }
