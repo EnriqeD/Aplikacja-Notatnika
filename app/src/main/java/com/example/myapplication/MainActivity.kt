@@ -237,6 +237,67 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
     }
 }
 
+@Composable
+fun NotesView(viewModel: MainViewModel, folderId: Int?) {
+    val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList())
+    else viewModel.allNotes.collectAsState(initial = emptyList())
+    val allFolders by viewModel.allFolders.collectAsState(initial = emptyList())
+    val context = LocalContext.current
+
+    // --- Stany Dialogów ---
+    var showAddDialog by remember { mutableStateOf(false) }
+    var noteToEdit by remember { mutableStateOf<Note?>(null) }
+    var editTitle by remember { mutableStateOf("") }
+    var editContent by remember { mutableStateOf("") }
+    var noteToMove by remember { mutableStateOf<Note?>(null) }
+    var noteToUnlock by remember { mutableStateOf<Note?>(null) }
+    var passwordInput by remember { mutableStateOf("") }
+
+// Pola dla nowej notatki
+    var newTitle by remember { mutableStateOf("") }
+    var newContent by remember { mutableStateOf("") }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(notes) { note ->
+                // Znajdź nazwę folderu dla tej notatki
+                val folderName = allFolders.find { it.id == note.folderId }?.name ?: "Ogólne"
+
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    colors = if(note.isLocked) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant) else CardDefaults.cardColors(),
+                    elevation = CardDefaults.cardElevation(2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        // TREŚĆ (Lewa strona)
+                        Column(modifier = Modifier.weight(1f)) {
+                            // TYTUŁ
+                            Text(
+                                text = note.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            // TREŚĆ
+                            if (note.isLocked) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Treść ukryta", fontSize = 14.sp, color = MaterialTheme.colorScheme.secondary, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                                }
+                            } else {
+                                Text(
+                                    text = note.content,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
 
 
 }
