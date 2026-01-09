@@ -324,6 +324,17 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                     tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                                 )
                             }
+                        // Dostępne tylko jeśli odblokowana:
+                            if (!note.isLocked) {
+                                // 2. EDYCJA
+                                IconButton(onClick = {
+                                    noteToEdit = note
+                                    editTitle = note.title
+                                    editContent = note.content
+                                }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary)
+                                }
 
 
-}
+
+                            }
