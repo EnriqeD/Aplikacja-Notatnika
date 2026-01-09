@@ -32,9 +32,9 @@ import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
-// ==========================================
+// =========================================
 // 1. BAZA DANYCH (Model Danych)
-// ==========================================
+// =========================================
 
 /**
  * Reprezentuje folder (kategorię) w bazie danych.
