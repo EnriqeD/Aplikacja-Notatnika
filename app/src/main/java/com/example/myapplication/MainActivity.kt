@@ -159,7 +159,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit) {
     ) {
         Icon(Icons.Default.EditNote, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.primary)
         Spacer(modifier = Modifier.height(24.dp))
-        Text("Notatnik PRO", style = MaterialTheme.typography.headlineMedium)
+        Text("NOTES", style = MaterialTheme.typography.headlineMedium)
         Spacer(modifier = Modifier.height(32.dp))
 
         OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Login (admin)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
