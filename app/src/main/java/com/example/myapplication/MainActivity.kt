@@ -141,6 +141,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun addFolder(name: String) = viewModelScope.launch { dao.insertFolder(Folder(name = name)) }
     fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
 }
+
 // ==========================================
 // 3. EKRAN LOGOWANIA
 // ==========================================
@@ -253,7 +254,7 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     var noteToUnlock by remember { mutableStateOf<Note?>(null) }
     var passwordInput by remember { mutableStateOf("") }
 
-// Pola dla nowej notatki
+    // Pola dla nowej notatki
     var newTitle by remember { mutableStateOf("") }
     var newContent by remember { mutableStateOf("") }
 
@@ -298,6 +299,7 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+
                             // INFORMACJA O FOLDERZE (NOWOŚĆ)
                             Spacer(modifier = Modifier.height(12.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -324,7 +326,8 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                     tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                                 )
                             }
-                        // Dostępne tylko jeśli odblokowana:
+
+                            // Dostępne tylko jeśli odblokowana:
                             if (!note.isLocked) {
                                 // 2. EDYCJA
                                 IconButton(onClick = {
@@ -334,7 +337,8 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                 }) {
                                     Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary)
                                 }
-                        // 3. Przenoszenie
+
+                                // 3. Przenoszenie
                                 IconButton(onClick = { noteToMove = note }) {
                                     Icon(Icons.Default.DriveFileMove, contentDescription = "Przenieś", tint = MaterialTheme.colorScheme.secondary)
                                 }
@@ -356,7 +360,8 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
         ) {
             Icon(Icons.Default.Add, contentDescription = "Dodaj")
         }
-// --- Dialog DODAWANIA ---
+
+        // --- Dialog DODAWANIA ---
         if (showAddDialog) {
             AlertDialog(
                 onDismissRequest = { showAddDialog = false },
@@ -511,6 +516,7 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
         }
     }
 }
+
 // ==========================================
 // 5. MAIN ACTIVITY
 // ==========================================
@@ -536,9 +542,4 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-}
-
-
-
-
 }
