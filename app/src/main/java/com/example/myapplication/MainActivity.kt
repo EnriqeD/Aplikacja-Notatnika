@@ -356,8 +356,164 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
         ) {
             Icon(Icons.Default.Add, contentDescription = "Dodaj")
         }
+// --- Dialog DODAWANIA ---
+        if (showAddDialog) {
+            AlertDialog(
+                onDismissRequest = { showAddDialog = false },
+                title = { Text("Nowa notatka") },
+                text = {
+                    Column {
+                        OutlinedTextField(value = newTitle, onValueChange = { newTitle = it }, label = { Text("Tytuł") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(value = newContent, onValueChange = { newContent = it }, label = { Text("Treść") }, modifier = Modifier.fillMaxWidth().height(150.dp), maxLines = 10)
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (newTitle.isNotBlank() || newContent.isNotBlank()) {
+                            val finalTitle = if(newTitle.isBlank()) "Bez tytułu" else newTitle
+                            viewModel.addNote(finalTitle, newContent, folderId)
+                            newTitle = ""; newContent = ""
+                            showAddDialog = false
+                        }
+                    }) { Text("Zapisz") }
+                },
+                dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("Anuluj") } }
+            )
+        }
 
+        // --- Dialog EDYCJI ---
+        if (noteToEdit != null) {
+            AlertDialog(
+                onDismissRequest = { noteToEdit = null },
+                title = { Text("Edytuj notatkę") },
+                text = {
+                    Column {
+                        OutlinedTextField(value = editTitle, onValueChange = { editTitle = it }, label = { Text("Tytuł") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(value = editContent, onValueChange = { editContent = it }, label = { Text("Treść") }, modifier = Modifier.fillMaxWidth().height(150.dp), maxLines = 10)
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val finalTitle = if(editTitle.isBlank()) "Bez tytułu" else editTitle
+                        viewModel.updateNote(noteToEdit!!.id, finalTitle, editContent)
+                        noteToEdit = null
+                    }) { Text("Aktualizuj") }
+                },
+                dismissButton = { TextButton(onClick = { noteToEdit = null }) { Text("Anuluj") } }
+            )
+        }
 
+        // --- Dialog PRZENOSZENIA ---
+        if (noteToMove != null) {
+            AlertDialog(
+                onDismissRequest = { noteToMove = null },
+                title = { Text("Przenieś do folderu") },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                        item {
+                            ListItem(
+                                headlineContent = { Text("Brak folderu (Ogólne)", fontWeight = FontWeight.Bold) },
+                                modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, null); noteToMove = null }
+                            )
+                            Divider()
+                        }
+                        items(allFolders) { folder ->
+                            ListItem(
+                                headlineContent = { Text(folder.name) },
+                                leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
+                                modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, folder.id); noteToMove = null }
+                            )
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { noteToMove = null }) { Text("Anuluj") } }
+            )
+        }
 
-
+        // --- Dialog HASŁA ---
+        if (noteToUnlock != null) {
+            AlertDialog(
+                onDismissRequest = { noteToUnlock = null; passwordInput = "" },
+                title = { Text("Podaj hasło") },
+                text = {
+                    Column {
+                        Text("Aby odszyfrować treść: \"${noteToUnlock?.title}\"")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = passwordInput,
+                            onValueChange = { passwordInput = it },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            label = { Text("Hasło (1234)") }
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (passwordInput == "1234") {
+                            viewModel.toggleLock(noteToUnlock!!)
+                            noteToUnlock = null
+                            passwordInput = ""
+                            Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Błędne hasło!", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("Odszyfruj") }
+                },
+                dismissButton = { TextButton(onClick = { noteToUnlock = null; passwordInput = "" }) { Text("Anuluj") } }
+            )
+        }
     }
+}
+
+@Composable
+fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
+    val folders by viewModel.allFolders.collectAsState(initial = emptyList())
+    var showDialog by remember { mutableStateOf(false) }
+    var folderName by remember { mutableStateOf("") }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(folders) { folder ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onFolderClick(folder) },
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                ) {
+                    Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Folder, contentDescription = null)
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        }
+                        IconButton(onClick = { viewModel.deleteFolder(folder) }) { Icon(Icons.Default.Delete, contentDescription = null) }
+                    }
+                }
+            }
+        }
+        FloatingActionButton(
+            onClick = { showDialog = true },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        ) { Icon(Icons.Default.CreateNewFolder, contentDescription = "Dodaj") }
+
+        if (showDialog) {
+            AlertDialog(
+                onDismissRequest = { showDialog = false },
+                title = { Text("Nowy Folder") },
+                text = { TextField(value = folderName, onValueChange = { folderName = it }) },
+                confirmButton = {
+                    Button(onClick = { if (folderName.isNotBlank()) { viewModel.addFolder(folderName); folderName = ""; showDialog = false } }) { Text("Utwórz") }
+                },
+                dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Anuluj") } }
+            )
+        }
+    }
+}
+
+
+
+
+
+}
