@@ -334,7 +334,30 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                                 }) {
                                     Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary)
                                 }
-
-
-
+                        // 3. Przenoszenie
+                                IconButton(onClick = { noteToMove = note }) {
+                                    Icon(Icons.Default.DriveFileMove, contentDescription = "Przenieś", tint = MaterialTheme.colorScheme.secondary)
+                                }
                             }
+
+                            // 4. Usuwanie
+                            IconButton(onClick = { viewModel.deleteNote(note) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Usuń", tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        FloatingActionButton(
+            onClick = { showAddDialog = true },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "Dodaj")
+        }
+
+
+
+
+    }
