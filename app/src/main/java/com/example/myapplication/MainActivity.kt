@@ -511,7 +511,32 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
         }
     }
 }
+// ==========================================
+// 5. MAIN ACTIVITY
+// ==========================================
 
+class MainActivity : ComponentActivity() {
+    private val viewModel by viewModels<MainViewModel>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme {
+                var isLoggedIn by remember { mutableStateOf(false) }
+                AnimatedContent(
+                    targetState = isLoggedIn, label = "Auth",
+                    transitionSpec = {
+                        if (targetState) (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
+                        else (slideInHorizontally { width -> -width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(animationSpec = tween(500)))
+                    }
+                ) { targetState ->
+                    if (targetState) MainAppScreen(viewModel, onLogout = { isLoggedIn = false })
+                    else LoginScreen(onLoginSuccess = { isLoggedIn = true })
+                }
+            }
+        }
+    }
+}
 
 
 
