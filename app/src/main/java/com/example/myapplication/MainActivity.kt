@@ -30,6 +30,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 
 // ==========================================
@@ -45,7 +46,8 @@ data class User(
 @Entity(tableName = "folders")
 data class Folder(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val name: String
+    val name: String,
+    val ownerUsername: String // NOWOŚĆ: Właściciel folderu
 )
 
 @Entity(
@@ -62,7 +64,8 @@ data class Note(
     val title: String,
     val content: String,
     val folderId: Int? = null,
-    val isLocked: Boolean = false
+    val isLocked: Boolean = false,
+    val ownerUsername: String // NOWOŚĆ: Właściciel notatki
 )
 
 @Dao
@@ -74,12 +77,12 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertUser(user: User)
 
-    // --- NOTATKI ---
-    @Query("SELECT * FROM notes ORDER BY id DESC")
-    fun getAllNotes(): Flow<List<Note>>
+    // --- NOTATKI (Filtrowane po użytkowniku) ---
+    @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
+    fun getAllNotes(username: String): Flow<List<Note>>
 
-    @Query("SELECT * FROM notes WHERE folderId = :folderId ORDER BY id DESC")
-    fun getNotesByFolder(folderId: Int): Flow<List<Note>>
+    @Query("SELECT * FROM notes WHERE folderId = :folderId AND ownerUsername = :username ORDER BY id DESC")
+    fun getNotesByFolder(folderId: Int, username: String): Flow<List<Note>>
 
     @Insert
     suspend fun insertNote(note: Note)
@@ -96,9 +99,9 @@ interface AppDao {
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
     suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
 
-    // --- FOLDERY ---
-    @Query("SELECT * FROM folders ORDER BY id DESC")
-    fun getAllFolders(): Flow<List<Folder>>
+    // --- FOLDERY (Filtrowane po użytkowniku) ---
+    @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
+    fun getAllFolders(username: String): Flow<List<Folder>>
 
     @Insert
     suspend fun insertFolder(folder: Folder)
@@ -107,7 +110,8 @@ interface AppDao {
     suspend fun deleteFolder(folder: Folder)
 }
 
-@Database(entities = [Note::class, Folder::class, User::class], version = 7, exportSchema = false)
+// Zmiana wersji na 8 (dodano pola ownerUsername)
+@Database(entities = [Note::class, Folder::class, User::class], version = 8, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
 
@@ -115,8 +119,8 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile private var INSTANCE: AppDatabase? = null
         fun getDatabase(context: android.content.Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v7")
-                    .fallbackToDestructiveMigration()
+                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v8")
+                    .fallbackToDestructiveMigration() // Wyczyszczenie bazy przy zmianie struktury
                     .build().also { INSTANCE = it }
             }
         }
@@ -130,10 +134,7 @@ abstract class AppDatabase : RoomDatabase() {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.getDatabase(application).dao()
 
-    val allNotes: Flow<List<Note>> = dao.getAllNotes()
-    val allFolders: Flow<List<Folder>> = dao.getAllFolders()
-
-    // NOWOŚĆ: Przechowujemy aktualnie zalogowanego użytkownika
+    // Aktualnie zalogowany użytkownik
     var currentUser by mutableStateOf<User?>(null)
         private set
 
@@ -155,7 +156,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         val user = dao.getUser(username)
         if (user != null && user.password == password) {
-            // ZAPISUJEMY ZALOGOWANEGO UŻYTKOWNIKA
             currentUser = user
             onSuccess()
         } else {
@@ -167,11 +167,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentUser = null
     }
 
-    // --- Notatki i Foldery ---
-    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> = dao.getNotesByFolder(folderId)
+    // --- POBIERANIE DANYCH (Tylko dla zalogowanego) ---
+
+    // Zwraca notatki tylko zalogowanego użytkownika
+    fun getAllNotesForCurrentUser(): Flow<List<Note>> {
+        return currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
+    }
+
+    // Zwraca foldery tylko zalogowanego użytkownika
+    fun getAllFoldersForCurrentUser(): Flow<List<Folder>> {
+        return currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
+    }
+
+    // Zwraca notatki z folderu (weryfikując właściciela)
+    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> {
+        return currentUser?.let { dao.getNotesByFolder(folderId, it.username) } ?: emptyFlow()
+    }
+
+    // --- OPERACJE (Dodawanie z przypisaniem właściciela) ---
 
     fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
-        dao.insertNote(Note(title = title, content = content, folderId = folderId, isLocked = false))
+        currentUser?.let { user ->
+            dao.insertNote(Note(
+                title = title,
+                content = content,
+                folderId = folderId,
+                isLocked = false,
+                ownerUsername = user.username // Przypisanie do użytkownika
+            ))
+        }
     }
 
     fun updateNote(id: Int, title: String, content: String) = viewModelScope.launch {
@@ -188,7 +212,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dao.updateNoteLock(note.id, !note.isLocked)
     }
 
-    fun addFolder(name: String) = viewModelScope.launch { dao.insertFolder(Folder(name = name)) }
+    fun addFolder(name: String) = viewModelScope.launch {
+        currentUser?.let { user ->
+            dao.insertFolder(Folder(name = name, ownerUsername = user.username)) // Przypisanie folderu
+        }
+    }
+
     fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
 }
 
@@ -329,7 +358,13 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                         }
                     }
                 },
-                actions = { TextButton(onClick = onLogout) { Text("Wyloguj") } }
+                actions = {
+                    // Wyświetla kto jest zalogowany
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
+                        Text(text = viewModel.currentUser?.username ?: "", style = MaterialTheme.typography.labelSmall)
+                        TextButton(onClick = onLogout) { Text("Wyloguj") }
+                    }
+                }
             )
         },
         bottomBar = {
@@ -342,15 +377,18 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
-            if (activeFolderId != null) {
-                NotesView(viewModel, folderId = activeFolderId)
-            } else {
-                when (selectedTab) {
-                    0 -> NotesView(viewModel, folderId = null)
-                    1 -> FoldersView(viewModel, onFolderClick = { folder ->
-                        activeFolderId = folder.id
-                        activeFolderName = folder.name
-                    })
+            // Przekazujemy klucz "currentUser", aby wymusić odświeżenie przy zmianie usera
+            key(viewModel.currentUser) {
+                if (activeFolderId != null) {
+                    NotesView(viewModel, folderId = activeFolderId)
+                } else {
+                    when (selectedTab) {
+                        0 -> NotesView(viewModel, folderId = null)
+                        1 -> FoldersView(viewModel, onFolderClick = { folder ->
+                            activeFolderId = folder.id
+                            activeFolderName = folder.name
+                        })
+                    }
                 }
             }
         }
@@ -359,12 +397,12 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
 
 @Composable
 fun NotesView(viewModel: MainViewModel, folderId: Int?) {
+    // Pobieramy notatki tylko dla zalogowanego użytkownika
     val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList())
-    else viewModel.allNotes.collectAsState(initial = emptyList())
-    val allFolders by viewModel.allFolders.collectAsState(initial = emptyList())
-    val context = LocalContext.current
+    else viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
 
-    // Pobieramy hasło aktualnego użytkownika
+    val allFolders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
+    val context = LocalContext.current
     val currentUserPassword = viewModel.currentUser?.password ?: ""
 
     var showAddDialog by remember { mutableStateOf(false) }
@@ -379,6 +417,12 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     var newContent by remember { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        if (notes.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Brak notatek", color = MaterialTheme.colorScheme.secondary)
+            }
+        }
+
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(notes) { note ->
                 val folderName = allFolders.find { it.id == note.folderId }?.name ?: "Ogólne"
@@ -526,7 +570,6 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                 },
                 confirmButton = {
                     Button(onClick = {
-                        // TUTAJ ZMIANA: Sprawdzamy hasło zalogowanego użytkownika
                         if (passwordInput == currentUserPassword) {
                             viewModel.toggleLock(noteToUnlock!!)
                             noteToUnlock = null; passwordInput = ""; Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show()
@@ -541,11 +584,18 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
 
 @Composable
 fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
-    val folders by viewModel.allFolders.collectAsState(initial = emptyList())
+    // Pobieramy foldery tylko dla zalogowanego użytkownika
+    val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
     var folderName by remember { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        if (folders.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Brak folderów", color = MaterialTheme.colorScheme.secondary)
+            }
+        }
+
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(folders) { folder ->
                 Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onFolderClick(folder) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
