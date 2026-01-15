@@ -1,4 +1,4 @@
-package com.example.myapplication
+package com.example.myapplication // <--- ZACHOWAJ SWOJĄ NAZWĘ PAKIETU!
 
 import android.app.Application
 import android.os.Bundle
@@ -10,9 +10,11 @@ import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -21,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -30,41 +33,34 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 
-// =========================================
-// 1. BAZA DANYCH (Model Danych)
-// =========================================
+// ==========================================
+// 1. BAZA DANYCH
+// ==========================================
 
-/**
- * Reprezentuje folder (kategorię) w bazie danych.
- *
- * @property id Unikalny identyfikator folderu (klucz główny, generowany automatycznie).
- * @property name Nazwa folderu wyświetlana użytkownikowi.
- */
+@Entity(tableName = "users")
+data class User(
+    @PrimaryKey val username: String,
+    val password: String,
+    val theme: String = "system" // NOWOŚĆ: "light", "dark" lub "system"
+)
+
 @Entity(tableName = "folders")
 data class Folder(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val name: String
+    val name: String,
+    val ownerUsername: String
 )
 
-/**
- * Reprezentuje pojedynczą notatkę w bazie danych.
- * Notatka może być przypisana do folderu lub być ogólna.
- *
- * @property id Unikalny identyfikator notatki (klucz główny).
- * @property title Tytuł notatki.
- * @property content Treść notatki.
- * @property folderId ID folderu, do którego należy notatka (klucz obcy). Jeśli null, notatka jest ogólna.
- * @property isLocked Określa, czy notatka jest zabezpieczona hasłem (zaszyfrowana).
- */
 @Entity(
     tableName = "notes",
     foreignKeys = [ForeignKey(
         entity = Folder::class,
         parentColumns = ["id"],
         childColumns = ["folderId"],
-        onDelete = ForeignKey.CASCADE // Usunięcie folderu usuwa wszystkie zawarte w nim notatki
+        onDelete = ForeignKey.CASCADE
     )]
 )
 data class Note(
@@ -72,117 +68,79 @@ data class Note(
     val title: String,
     val content: String,
     val folderId: Int? = null,
-    val isLocked: Boolean = false
+    val isLocked: Boolean = false,
+    val ownerUsername: String
 )
 
-/**
- * Interfejs DAO (Data Access Object).
- * Definiuje wszystkie operacje, jakie można wykonać na bazie danych.
- */
 @Dao
 interface AppDao {
-    // --- Sekcja Notatek ---
+    // --- UŻYTKOWNICY ---
+    @Query("SELECT * FROM users WHERE username = :username LIMIT 1")
+    suspend fun getUser(username: String): User?
 
-    /**
-     * Pobiera wszystkie notatki z bazy danych, posortowane malejąco po ID (najnowsze na górze).
-     * @return Strumień (Flow) listy notatek.
-     */
-    @Query("SELECT * FROM notes ORDER BY id DESC")
-    fun getAllNotes(): Flow<List<Note>>
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertUser(user: User)
 
-    /**
-     * Pobiera notatki należące do konkretnego folderu.
-     * @param folderId ID folderu.
-     * @return Strumień (Flow) listy notatek w danym folderze.
-     */
-    @Query("SELECT * FROM notes WHERE folderId = :folderId ORDER BY id DESC")
-    fun getNotesByFolder(folderId: Int): Flow<List<Note>>
+    @Query("UPDATE users SET password = :newPassword WHERE username = :username")
+    suspend fun updateUserPassword(username: String, newPassword: String)
 
-    /**
-     * Dodaje nową notatkę do bazy.
-     * @param note Obiekt notatki do dodania.
-     */
+    // NOWOŚĆ: Aktualizacja motywu
+    @Query("UPDATE users SET theme = :theme WHERE username = :username")
+    suspend fun updateUserTheme(username: String, theme: String)
+
+    @Query("DELETE FROM users WHERE username = :username")
+    suspend fun deleteUser(username: String)
+
+    @Query("DELETE FROM notes WHERE ownerUsername = :username")
+    suspend fun deleteAllUserNotes(username: String)
+
+    @Query("DELETE FROM folders WHERE ownerUsername = :username")
+    suspend fun deleteAllUserFolders(username: String)
+
+    // --- NOTATKI ---
+    @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
+    fun getAllNotes(username: String): Flow<List<Note>>
+
+    @Query("SELECT * FROM notes WHERE folderId = :folderId AND ownerUsername = :username ORDER BY id DESC")
+    fun getNotesByFolder(folderId: Int, username: String): Flow<List<Note>>
+
     @Insert
     suspend fun insertNote(note: Note)
 
-    /**
-     * Usuwa notatkę z bazy.
-     * @param note Obiekt notatki do usunięcia.
-     */
     @Delete
     suspend fun deleteNote(note: Note)
 
-    /**
-     * Aktualizuje tytuł i treść istniejącej notatki.
-     * @param id ID edytowanej notatki.
-     * @param title Nowy tytuł.
-     * @param content Nowa treść.
-     */
     @Query("UPDATE notes SET title = :title, content = :content WHERE id = :id")
     suspend fun updateNoteContent(id: Int, title: String, content: String)
 
-    /**
-     * Przenosi notatkę do innego folderu.
-     * @param noteId ID przenoszonej notatki.
-     * @param folderId ID nowego folderu (lub null dla braku folderu).
-     */
     @Query("UPDATE notes SET folderId = :folderId WHERE id = :noteId")
     suspend fun updateNoteFolder(noteId: Int, folderId: Int?)
 
-    /**
-     * Zmienia status blokady notatki (szyfrowanie).
-     * @param noteId ID notatki.
-     * @param isLocked True jeśli ma być zablokowana, False jeśli odblokowana.
-     */
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
     suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
 
-    // --- Sekcja Folderów ---
+    // --- FOLDERY ---
+    @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
+    fun getAllFolders(username: String): Flow<List<Folder>>
 
-    /**
-     * Pobiera wszystkie foldery.
-     * @return Strumień (Flow) listy folderów.
-     */
-    @Query("SELECT * FROM folders ORDER BY id DESC")
-    fun getAllFolders(): Flow<List<Folder>>
-
-    /**
-     * Tworzy nowy folder.
-     * @param folder Obiekt folderu.
-     */
     @Insert
     suspend fun insertFolder(folder: Folder)
 
-    /**
-     * Usuwa folder. Uwaga: Usuwa też kaskadowo notatki w nim zawarte.
-     * @param folder Obiekt folderu do usunięcia.
-     */
     @Delete
     suspend fun deleteFolder(folder: Folder)
 }
 
-/**
- * Główna klasa bazy danych Room.
- * Zarządza połączeniem z bazą SQLite i dostarcza instancję DAO.
- */
-@Database(entities = [Note::class, Folder::class], version = 6, exportSchema = false)
+// Wersja 10 - dodano pole theme w tabeli users
+@Database(entities = [Note::class, Folder::class, User::class], version = 10, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
-
-        /**
-         * Zwraca instancję bazy danych (Singleton).
-         * Jeśli baza nie istnieje, tworzy ją.
-         *
-         * @param context Kontekst aplikacji.
-         * @return Instancja AppDatabase.
-         */
         fun getDatabase(context: android.content.Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v6")
-                    .fallbackToDestructiveMigration() // Czyści bazę przy zmianie wersji, aby uniknąć błędów migracji
+                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v10")
+                    .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }
         }
@@ -190,74 +148,97 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. VIEWMODEL (Logika Biznesowa)
+// 2. VIEWMODEL
 // ==========================================
 
-/**
- * ViewModel zarządzający danymi aplikacji.
- * Pośredniczy między warstwą UI (Compose) a warstwą danych (Room).
- * Odpowiada za uruchamianie operacji bazodanowych w osobnych wątkach (Coroutines).
- */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.getDatabase(application).dao()
 
-    /** Strumień wszystkich notatek w aplikacji. */
-    val allNotes: Flow<List<Note>> = dao.getAllNotes()
+    var currentUser by mutableStateOf<User?>(null)
+        private set
 
-    /** Strumień wszystkich folderów w aplikacji. */
-    val allFolders: Flow<List<Folder>> = dao.getAllFolders()
+    // --- LOGOWANIE, REJESTRACJA, USTAWIENIA ---
 
-    /**
-     * Pobiera strumień notatek dla konkretnego folderu.
-     * @param folderId ID folderu.
-     */
-    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> = dao.getNotesByFolder(folderId)
+    fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
+        try {
+            val existing = dao.getUser(user.username)
+            if (existing != null) {
+                onError("Użytkownik o takim loginie już istnieje!")
+            } else {
+                dao.insertUser(user)
+                onSuccess()
+            }
+        } catch (e: Exception) {
+            onError("Błąd rejestracji: ${e.message}")
+        }
+    }
 
-    /**
-     * Dodaje nową notatkę.
-     * Domyślnie notatka jest niezaszyfrowana.
-     */
+    fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
+        val user = dao.getUser(username)
+        if (user != null && user.password == password) {
+            currentUser = user
+            onSuccess()
+        } else {
+            onError("Błędny login lub hasło!")
+        }
+    }
+
+    fun logout() {
+        currentUser = null
+    }
+
+    fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch {
+        currentUser?.let { user ->
+            dao.updateUserPassword(user.username, newPassword)
+            currentUser = user.copy(password = newPassword)
+            onSuccess()
+        }
+    }
+
+    // NOWOŚĆ: Zmiana motywu
+    fun changeTheme(newTheme: String) = viewModelScope.launch {
+        currentUser?.let { user ->
+            dao.updateUserTheme(user.username, newTheme)
+            currentUser = user.copy(theme = newTheme) // Odśwież stan lokalny, aby UI zareagowało
+        }
+    }
+
+    fun deleteAccount(onSuccess: () -> Unit) = viewModelScope.launch {
+        currentUser?.let { user ->
+            dao.deleteAllUserNotes(user.username)
+            dao.deleteAllUserFolders(user.username)
+            dao.deleteUser(user.username)
+            currentUser = null
+            onSuccess()
+        }
+    }
+
+    // --- NOTATKI I FOLDERY ---
+
+    fun getAllNotesForCurrentUser(): Flow<List<Note>> = currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
+    fun getAllFoldersForCurrentUser(): Flow<List<Folder>> = currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
+    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> = currentUser?.let { dao.getNotesByFolder(folderId, it.username) } ?: emptyFlow()
+
     fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
-        dao.insertNote(Note(title = title, content = content, folderId = folderId, isLocked = false))
+        currentUser?.let { user ->
+            dao.insertNote(Note(title = title, content = content, folderId = folderId, isLocked = false, ownerUsername = user.username))
+        }
     }
 
-    /** Aktualizuje treść i tytuł notatki. */
-    fun updateNote(id: Int, title: String, content: String) = viewModelScope.launch {
-        dao.updateNoteContent(id, title, content)
-    }
-
-    /** Usuwa notatkę. */
+    fun updateNote(id: Int, title: String, content: String) = viewModelScope.launch { dao.updateNoteContent(id, title, content) }
     fun deleteNote(note: Note) = viewModelScope.launch { dao.deleteNote(note) }
-
-    /** Przenosi notatkę do innego folderu. */
-    fun moveNote(note: Note, folderId: Int?) = viewModelScope.launch {
-        dao.updateNoteFolder(note.id, folderId)
-    }
-
-    /** Przełącza stan blokady (szyfrowania) notatki. */
-    fun toggleLock(note: Note) = viewModelScope.launch {
-        dao.updateNoteLock(note.id, !note.isLocked)
-    }
-
-    /** Dodaje nowy folder. */
-    fun addFolder(name: String) = viewModelScope.launch { dao.insertFolder(Folder(name = name)) }
-
-    /** Usuwa folder. */
+    fun moveNote(note: Note, folderId: Int?) = viewModelScope.launch { dao.updateNoteFolder(note.id, folderId) }
+    fun toggleLock(note: Note) = viewModelScope.launch { dao.updateNoteLock(note.id, !note.isLocked) }
+    fun addFolder(name: String) = viewModelScope.launch { currentUser?.let { user -> dao.insertFolder(Folder(name = name, ownerUsername = user.username)) } }
     fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
 }
 
 // ==========================================
-// 3. UI - EKRAN LOGOWANIA
+// 3. WIDOKI LOGOWANIA I REJESTRACJI
 // ==========================================
 
-/**
- * Komponent ekranu logowania.
- * Sprawdza "na sztywno" dane logowania (admin / 1234).
- *
- * @param onLoginSuccess Funkcja wywoływana po poprawnym zalogowaniu.
- */
 @Composable
-fun LoginScreen(onLoginSuccess: () -> Unit) {
+fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigateToRegister: () -> Unit) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     val context = LocalContext.current
@@ -267,49 +248,85 @@ fun LoginScreen(onLoginSuccess: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(Icons.Default.EditNote, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.primary)
+        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.primary)
         Spacer(modifier = Modifier.height(24.dp))
-        Text("NOTES", style = MaterialTheme.typography.headlineMedium)
+        Text("Zaloguj się", style = MaterialTheme.typography.headlineMedium)
         Spacer(modifier = Modifier.height(32.dp))
 
-        OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Login (admin)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(16.dp))
         OutlinedTextField(
-            value = password, onValueChange = { password = it }, label = { Text("Hasło (1234)") },
+            value = password, onValueChange = { password = it }, label = { Text("Hasło") },
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             singleLine = true, modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(32.dp))
 
         Button(onClick = {
-            if (username == "admin" && password == "1234") onLoginSuccess()
-            else Toast.makeText(context, "Błąd! Login: admin, Hasło: 1234", Toast.LENGTH_SHORT).show()
-        }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Zaloguj się") }
+            if (username.isNotBlank() && password.isNotBlank()) {
+                viewModel.loginUser(username, password,
+                    onSuccess = onLoginSuccess,
+                    onError = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+                )
+            } else { Toast.makeText(context, "Wpisz login i hasło", Toast.LENGTH_SHORT).show() }
+        }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Wejdź") }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        TextButton(onClick = onNavigateToRegister) { Text("Nie masz konta? Zarejestruj się") }
+    }
+}
+
+@Composable
+fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    val context = LocalContext.current
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.secondary)
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("Załóż konto", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(32.dp))
+
+        OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Wybierz Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedTextField(value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Potwierdź Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(modifier = Modifier.height(32.dp))
+
+        Button(onClick = {
+            if (username.isBlank() || password.isBlank()) { Toast.makeText(context, "Uzupełnij wszystkie pola", Toast.LENGTH_SHORT).show() }
+            else if (password != confirmPassword) { Toast.makeText(context, "Hasła nie są takie same!", Toast.LENGTH_SHORT).show() }
+            else {
+                viewModel.registerUser(User(username, password),
+                    onSuccess = { Toast.makeText(context, "Konto utworzone! Zaloguj się.", Toast.LENGTH_SHORT).show(); onRegisterSuccess() },
+                    onError = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+                )
+            }
+        }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Zarejestruj się") }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        TextButton(onClick = onNavigateToLogin) { Text("Masz już konto? Zaloguj się") }
     }
 }
 
 // ==========================================
-// 4. EKRAN GŁÓWNY I WIDOKI
+// 4. GŁÓWNA STRUKTURA APLIKACJI
 // ==========================================
 
-/**
- * Główny ekran aplikacji (po zalogowaniu).
- * Zawiera pasek górny (TopAppBar), dolną nawigację (BottomBar)
- * oraz zarządza widokami Notatek i Folderów.
- *
- * @param viewModel Główny ViewModel aplikacji.
- * @param onLogout Funkcja wylogowania użytkownika.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
-    // 0 = Notatki, 1 = Foldery
     var selectedTab by remember { mutableIntStateOf(0) }
-    // Stan przechowywania ID aktywnego folderu (jeśli użytkownik wszedł do środka)
     var activeFolderId by remember { mutableStateOf<Int?>(null) }
     var activeFolderName by remember { mutableStateOf("") }
 
-    // Obsługa przycisku "Wstecz" na telefonie - wychodzi z folderu zamiast zamykać apkę
     BackHandler(enabled = activeFolderId != null) { activeFolderId = null }
 
     Scaffold(
@@ -318,7 +335,8 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                 title = {
                     if (activeFolderId != null) Text("Folder: $activeFolderName")
                     else if (selectedTab == 0) Text("NOTES")
-                    else Text("Moje Foldery")
+                    else if (selectedTab == 1) Text("Moje Foldery")
+                    else Text("Ustawienia")
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -326,57 +344,147 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                 ),
                 navigationIcon = {
                     if (activeFolderId != null) {
-                        IconButton(onClick = { activeFolderId = null }) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Wróć")
-                        }
+                        IconButton(onClick = { activeFolderId = null }) { Icon(Icons.Default.ArrowBack, contentDescription = "Wróć") }
                     }
                 },
-                actions = { TextButton(onClick = onLogout) { Text("Wyloguj") } }
+                actions = { if (selectedTab != 2) TextButton(onClick = onLogout) { Text("Wyloguj") } }
             )
         },
         bottomBar = {
-            // Dolny pasek ukrywamy, gdy jesteśmy wewnątrz folderu
             if (activeFolderId == null) {
                 NavigationBar {
                     NavigationBarItem(icon = { Icon(Icons.Default.Description, contentDescription = null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
                     NavigationBarItem(icon = { Icon(Icons.Default.Folder, contentDescription = null) }, label = { Text("Foldery") }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
+                    NavigationBarItem(icon = { Icon(Icons.Default.Settings, contentDescription = null) }, label = { Text("Ustawienia") }, selected = selectedTab == 2, onClick = { selectedTab = 2 })
                 }
             }
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
-            if (activeFolderId != null) {
-                // Widok notatek wewnątrz konkretnego folderu
-                NotesView(viewModel, folderId = activeFolderId)
-            } else {
-                // Główne zakładki
-                when (selectedTab) {
-                    0 -> NotesView(viewModel, folderId = null)
-                    1 -> FoldersView(viewModel, onFolderClick = { folder ->
-                        activeFolderId = folder.id
-                        activeFolderName = folder.name
-                    })
+            key(viewModel.currentUser) {
+                if (activeFolderId != null) {
+                    NotesView(viewModel, folderId = activeFolderId)
+                } else {
+                    when (selectedTab) {
+                        0 -> NotesView(viewModel, folderId = null)
+                        1 -> FoldersView(viewModel, onFolderClick = { folder -> activeFolderId = folder.id; activeFolderName = folder.name })
+                        2 -> SettingsView(viewModel, onLogout)
+                    }
                 }
             }
         }
     }
 }
 
-/**
- * Komponent wyświetlający listę notatek.
- * Obsługuje operacje: dodawanie, usuwanie, edycja, przenoszenie, szyfrowanie.
- *
- * @param viewModel ViewModel danych.
- * @param folderId ID folderu do filtrowania (null dla wszystkich notatek).
- */
+// --- EKRAN USTAWIENIA (Z Wyborem Motywu) ---
+@Composable
+fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
+    val context = LocalContext.current
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountDialog by remember { mutableStateOf(false) }
+    var newPassword by remember { mutableStateOf("") }
+
+    // Pobranie aktualnego motywu użytkownika
+    val currentTheme = viewModel.currentUser?.theme ?: "system"
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(100.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Zalogowany jako:", style = MaterialTheme.typography.bodyLarge)
+        Text(text = viewModel.currentUser?.username ?: "Błąd", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Divider()
+
+        // --- SEKCJA MOTYWU ---
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Motyw aplikacji", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+            val themes = listOf("system" to "Systemowy", "light" to "Jasny", "dark" to "Ciemny")
+            themes.forEach { (key, label) ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .selectable(
+                            selected = (currentTheme == key),
+                            onClick = { viewModel.changeTheme(key) },
+                            role = Role.RadioButton
+                        )
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = (currentTheme == key),
+                        onClick = null // null, bo obsługuje to Row
+                    )
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(start = 16.dp)
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Divider()
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Przyciski akcji
+        OutlinedButton(onClick = { showPasswordDialog = true }, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+            Icon(Icons.Default.LockReset, contentDescription = null); Spacer(modifier = Modifier.width(8.dp))
+            Text("Zmień hasło")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = { showDeleteAccountDialog = true },
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ) {
+            Icon(Icons.Default.DeleteForever, contentDescription = null); Spacer(modifier = Modifier.width(8.dp))
+            Text("Usuń konto")
+        }
+
+        // Dialogi
+        if (showPasswordDialog) {
+            AlertDialog(
+                onDismissRequest = { showPasswordDialog = false; newPassword = "" },
+                title = { Text("Zmiana hasła") },
+                text = { OutlinedTextField(value = newPassword, onValueChange = { newPassword = it }, label = { Text("Nowe hasło") }, visualTransformation = PasswordVisualTransformation(), singleLine = true) },
+                confirmButton = { Button(onClick = { if (newPassword.isNotBlank()) { viewModel.changePassword(newPassword) { Toast.makeText(context, "Hasło zmienione", Toast.LENGTH_SHORT).show(); showPasswordDialog = false; newPassword = "" } } }) { Text("Zapisz") } },
+                dismissButton = { TextButton(onClick = { showPasswordDialog = false }) { Text("Anuluj") } }
+            )
+        }
+
+        if (showDeleteAccountDialog) {
+            AlertDialog(
+                onDismissRequest = { showDeleteAccountDialog = false },
+                title = { Text("Usunąć konto?") },
+                text = { Text("Ta operacja jest nieodwracalna. Wszystkie dane zostaną usunięte.") },
+                confirmButton = { Button(onClick = { viewModel.deleteAccount { showDeleteAccountDialog = false; onLogout(); Toast.makeText(context, "Konto usunięte", Toast.LENGTH_LONG).show() } }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Tak, usuń") } },
+                dismissButton = { TextButton(onClick = { showDeleteAccountDialog = false }) { Text("Anuluj") } }
+            )
+        }
+    }
+}
+
+// --- POZOSTAŁE WIDOKI (Notatki i Foldery) ---
 @Composable
 fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList())
-    else viewModel.allNotes.collectAsState(initial = emptyList())
-    val allFolders by viewModel.allFolders.collectAsState(initial = emptyList())
+    else viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
+    val allFolders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     val context = LocalContext.current
+    val currentUserPassword = viewModel.currentUser?.password ?: ""
 
-    // --- Stany Dialogów (okienek) ---
     var showAddDialog by remember { mutableStateOf(false) }
     var noteToEdit by remember { mutableStateOf<Note?>(null) }
     var editTitle by remember { mutableStateOf("") }
@@ -384,306 +492,109 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     var noteToMove by remember { mutableStateOf<Note?>(null) }
     var noteToUnlock by remember { mutableStateOf<Note?>(null) }
     var passwordInput by remember { mutableStateOf("") }
-
-    // Pola dla nowej notatki
     var newTitle by remember { mutableStateOf("") }
     var newContent by remember { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        if (notes.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Brak notatek", color = MaterialTheme.colorScheme.secondary) }
+
         LazyColumn(modifier = Modifier.fillMaxSize()) {
             items(notes) { note ->
-                // Znajdź nazwę folderu dla tej notatki (do wyświetlenia na dole karty)
                 val folderName = allFolders.find { it.id == note.folderId }?.name ?: "Ogólne"
-
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                    // Zmiana koloru tła jeśli notatka jest zablokowana
-                    colors = if(note.isLocked) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant) else CardDefaults.cardColors(),
-                    elevation = CardDefaults.cardElevation(2.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        // LEWA STRONA: Treść notatki
+                Card(modifier = Modifier.fillMaxWidth().padding(8.dp), colors = if(note.isLocked) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant) else CardDefaults.cardColors(), elevation = CardDefaults.cardElevation(2.dp)) {
+                    Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
                         Column(modifier = Modifier.weight(1f)) {
-                            // Tytuł
-                            Text(
-                                text = note.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
+                            Text(text = note.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                             Spacer(modifier = Modifier.height(4.dp))
-
-                            // Treść lub informacja o blokadzie
                             if (note.isLocked) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)); Spacer(modifier = Modifier.width(4.dp))
                                     Text("Treść ukryta", fontSize = 14.sp, color = MaterialTheme.colorScheme.secondary, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
                                 }
-                            } else {
-                                Text(
-                                    text = note.content,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
-                            // Podpis z nazwą folderu
+                            } else { Text(text = note.content, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                             Spacer(modifier = Modifier.height(12.dp))
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary)
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = folderName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.tertiary
-                                )
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary); Spacer(modifier = Modifier.width(4.dp))
+                                Text(text = folderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
                             }
                         }
-
-                        // PRAWA STRONA: Ikony akcji
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            // 1. Szyfrowanie (Kłódka)
-                            IconButton(onClick = {
-                                if (note.isLocked) noteToUnlock = note
-                                else { viewModel.toggleLock(note); Toast.makeText(context, "Zablokowano", Toast.LENGTH_SHORT).show() }
-                            }) {
-                                Icon(
-                                    imageVector = if (note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                                    contentDescription = "Szyfruj",
-                                    tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                                )
-                            }
-
-                            // Dostępne tylko jeśli notatka jest ODBLOKOWANA:
+                            IconButton(onClick = { if (note.isLocked) noteToUnlock = note else { viewModel.toggleLock(note); Toast.makeText(context, "Zablokowano", Toast.LENGTH_SHORT).show() } }) { Icon(imageVector = if (note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen, contentDescription = "Szyfruj", tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline) }
                             if (!note.isLocked) {
-                                // 2. Edycja
-                                IconButton(onClick = {
-                                    noteToEdit = note
-                                    editTitle = note.title
-                                    editContent = note.content
-                                }) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary)
-                                }
-
-                                // 3. Przenoszenie
-                                IconButton(onClick = { noteToMove = note }) {
-                                    Icon(Icons.Default.DriveFileMove, contentDescription = "Przenieś", tint = MaterialTheme.colorScheme.secondary)
-                                }
+                                IconButton(onClick = { noteToEdit = note; editTitle = note.title; editContent = note.content }) { Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary) }
+                                IconButton(onClick = { noteToMove = note }) { Icon(Icons.Default.DriveFileMove, contentDescription = "Przenieś", tint = MaterialTheme.colorScheme.secondary) }
                             }
-
-                            // 4. Usuwanie
-                            IconButton(onClick = { viewModel.deleteNote(note) }) {
-                                Icon(Icons.Default.Delete, contentDescription = "Usuń", tint = MaterialTheme.colorScheme.error)
-                            }
+                            IconButton(onClick = { viewModel.deleteNote(note) }) { Icon(Icons.Default.Delete, contentDescription = "Usuń", tint = MaterialTheme.colorScheme.error) }
                         }
                     }
                 }
             }
         }
 
-        // Przycisk FAB (Dodawanie notatki)
-        FloatingActionButton(
-            onClick = { showAddDialog = true },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
-        ) {
-            Icon(Icons.Default.Add, contentDescription = "Dodaj")
-        }
+        FloatingActionButton(onClick = { showAddDialog = true }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.Add, contentDescription = "Dodaj") }
 
-        // --- OKNO: DODAWANIE NOTATKI ---
         if (showAddDialog) {
-            AlertDialog(
-                onDismissRequest = { showAddDialog = false },
-                title = { Text("Nowa notatka") },
-                text = {
-                    Column {
-                        OutlinedTextField(value = newTitle, onValueChange = { newTitle = it }, label = { Text("Tytuł") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(value = newContent, onValueChange = { newContent = it }, label = { Text("Treść") }, modifier = Modifier.fillMaxWidth().height(150.dp), maxLines = 10)
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        if (newTitle.isNotBlank() || newContent.isNotBlank()) {
-                            val finalTitle = if(newTitle.isBlank()) "Bez tytułu" else newTitle
-                            viewModel.addNote(finalTitle, newContent, folderId)
-                            newTitle = ""; newContent = ""
-                            showAddDialog = false
-                        }
-                    }) { Text("Zapisz") }
-                },
-                dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("Anuluj") } }
-            )
+            AlertDialog(onDismissRequest = { showAddDialog = false }, title = { Text("Nowa notatka") }, text = { Column { OutlinedTextField(value = newTitle, onValueChange = { newTitle = it }, label = { Text("Tytuł") }, singleLine = true); Spacer(modifier = Modifier.height(8.dp)); OutlinedTextField(value = newContent, onValueChange = { newContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button(onClick = { if (newTitle.isNotBlank() || newContent.isNotBlank()) { viewModel.addNote(if(newTitle.isBlank()) "Bez tytułu" else newTitle, newContent, folderId); newTitle = ""; newContent = ""; showAddDialog = false } }) { Text("Zapisz") } }, dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("Anuluj") } })
         }
-
-        // --- OKNO: EDYCJA NOTATKI ---
         if (noteToEdit != null) {
-            AlertDialog(
-                onDismissRequest = { noteToEdit = null },
-                title = { Text("Edytuj notatkę") },
-                text = {
-                    Column {
-                        OutlinedTextField(value = editTitle, onValueChange = { editTitle = it }, label = { Text("Tytuł") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(value = editContent, onValueChange = { editContent = it }, label = { Text("Treść") }, modifier = Modifier.fillMaxWidth().height(150.dp), maxLines = 10)
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        val finalTitle = if(editTitle.isBlank()) "Bez tytułu" else editTitle
-                        viewModel.updateNote(noteToEdit!!.id, finalTitle, editContent)
-                        noteToEdit = null
-                    }) { Text("Aktualizuj") }
-                },
-                dismissButton = { TextButton(onClick = { noteToEdit = null }) { Text("Anuluj") } }
-            )
+            AlertDialog(onDismissRequest = { noteToEdit = null }, title = { Text("Edytuj") }, text = { Column { OutlinedTextField(value = editTitle, onValueChange = { editTitle = it }, label = { Text("Tytuł") }); Spacer(modifier = Modifier.height(8.dp)); OutlinedTextField(value = editContent, onValueChange = { editContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button(onClick = { viewModel.updateNote(noteToEdit!!.id, if(editTitle.isBlank()) "Bez tytułu" else editTitle, editContent); noteToEdit = null }) { Text("Aktualizuj") } }, dismissButton = { TextButton(onClick = { noteToEdit = null }) { Text("Anuluj") } })
         }
-
-        // --- OKNO: PRZENOSZENIE NOTATKI ---
         if (noteToMove != null) {
-            AlertDialog(
-                onDismissRequest = { noteToMove = null },
-                title = { Text("Przenieś do folderu") },
-                text = {
-                    LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
-                        item {
-                            ListItem(
-                                headlineContent = { Text("Brak folderu (Ogólne)", fontWeight = FontWeight.Bold) },
-                                modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, null); noteToMove = null }
-                            )
-                            Divider()
-                        }
-                        items(allFolders) { folder ->
-                            ListItem(
-                                headlineContent = { Text(folder.name) },
-                                leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
-                                modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, folder.id); noteToMove = null }
-                            )
-                        }
-                    }
-                },
-                confirmButton = { TextButton(onClick = { noteToMove = null }) { Text("Anuluj") } }
-            )
+            AlertDialog(onDismissRequest = { noteToMove = null }, title = { Text("Przenieś do") }, text = { LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) { item { ListItem(headlineContent = { Text("Brak folderu", fontWeight = FontWeight.Bold) }, modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, null); noteToMove = null }); Divider() }; items(allFolders) { folder -> ListItem(headlineContent = { Text(folder.name) }, leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) }, modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, folder.id); noteToMove = null }) } } }, confirmButton = { TextButton(onClick = { noteToMove = null }) { Text("Anuluj") } })
         }
-
-        // --- OKNO: ODBLOKOWYWANIE HASŁEM ---
         if (noteToUnlock != null) {
-            AlertDialog(
-                onDismissRequest = { noteToUnlock = null; passwordInput = "" },
-                title = { Text("Podaj hasło") },
-                text = {
-                    Column {
-                        Text("Aby odszyfrować treść: \"${noteToUnlock?.title}\"")
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(
-                            value = passwordInput,
-                            onValueChange = { passwordInput = it },
-                            visualTransformation = PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            label = { Text("Hasło (1234)") }
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        if (passwordInput == "1234") {
-                            viewModel.toggleLock(noteToUnlock!!)
-                            noteToUnlock = null
-                            passwordInput = ""
-                            Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Błędne hasło!", Toast.LENGTH_SHORT).show()
-                        }
-                    }) { Text("Odszyfruj") }
-                },
-                dismissButton = { TextButton(onClick = { noteToUnlock = null; passwordInput = "" }) { Text("Anuluj") } }
-            )
+            AlertDialog(onDismissRequest = { noteToUnlock = null; passwordInput = "" }, title = { Text("Podaj hasło") }, text = { OutlinedTextField(value = passwordInput, onValueChange = { passwordInput = it }, visualTransformation = PasswordVisualTransformation(), label = { Text("Hasło użytkownika") }) }, confirmButton = { Button(onClick = { if (passwordInput == currentUserPassword) { viewModel.toggleLock(noteToUnlock!!); noteToUnlock = null; passwordInput = ""; Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show() } else { Toast.makeText(context, "Błędne hasło!", Toast.LENGTH_SHORT).show() } }) { Text("Odszyfruj") } }, dismissButton = { TextButton(onClick = { noteToUnlock = null; passwordInput = "" }) { Text("Anuluj") } })
         }
     }
 }
 
-/**
- * Komponent wyświetlający listę folderów.
- * Umożliwia tworzenie i usuwanie folderów.
- */
 @Composable
 fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
-    val folders by viewModel.allFolders.collectAsState(initial = emptyList())
+    val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
     var folderName by remember { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(folders) { folder ->
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onFolderClick(folder) },
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-                ) {
-                    Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Folder, contentDescription = null)
-                            Spacer(modifier = Modifier.width(16.dp))
-                            Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        }
-                        IconButton(onClick = { viewModel.deleteFolder(folder) }) { Icon(Icons.Default.Delete, contentDescription = null) }
-                    }
-                }
-            }
-        }
-
-        // Przycisk FAB (Dodawanie folderu)
-        FloatingActionButton(
-            onClick = { showDialog = true },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        ) { Icon(Icons.Default.CreateNewFolder, contentDescription = "Dodaj") }
-
-        // --- OKNO: NOWY FOLDER ---
-        if (showDialog) {
-            AlertDialog(
-                onDismissRequest = { showDialog = false },
-                title = { Text("Nowy Folder") },
-                text = { TextField(value = folderName, onValueChange = { folderName = it }) },
-                confirmButton = {
-                    Button(onClick = { if (folderName.isNotBlank()) { viewModel.addFolder(folderName); folderName = ""; showDialog = false } }) { Text("Utwórz") }
-                },
-                dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Anuluj") } }
-            )
-        }
+        if (folders.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Brak folderów", color = MaterialTheme.colorScheme.secondary) }
+        LazyColumn(modifier = Modifier.fillMaxSize()) { items(folders) { folder -> Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onFolderClick(folder) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder, contentDescription = null); Spacer(modifier = Modifier.width(16.dp)); Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp) }; IconButton(onClick = { viewModel.deleteFolder(folder) }) { Icon(Icons.Default.Delete, contentDescription = null) } } } } }
+        FloatingActionButton(onClick = { showDialog = true }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = MaterialTheme.colorScheme.secondaryContainer) { Icon(Icons.Default.CreateNewFolder, contentDescription = "Dodaj") }
+        if (showDialog) { AlertDialog(onDismissRequest = { showDialog = false }, title = { Text("Nowy Folder") }, text = { TextField(value = folderName, onValueChange = { folderName = it }) }, confirmButton = { Button(onClick = { if (folderName.isNotBlank()) { viewModel.addFolder(folderName); folderName = ""; showDialog = false } }) { Text("Utwórz") } }, dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Anuluj") } }) }
     }
 }
 
-// ==========================================
-// 5. MAIN ACTIVITY (Wejście do aplikacji)
-// ==========================================
+enum class ScreenState { LOGIN, REGISTER, APP }
 
-/**
- * Główna aktywność aplikacji.
- * Odpowiada za inicjalizację ViewModelu i wyświetlanie głównego interfejsu (Compose).
- * Obsługuje animowane przejście między ekranem logowania a aplikacją.
- */
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
-                var isLoggedIn by remember { mutableStateOf(false) }
-                // Animowane przejście między logowaniem a aplikacją (Slide + Fade)
+            // --- ZASTOSOWANIE MOTYWU ---
+            // Pobieramy preferencje usera. Jeśli brak (niezalogowany) -> system
+            val userTheme = viewModel.currentUser?.theme ?: "system"
+            val isDark = when (userTheme) {
+                "light" -> false
+                "dark" -> true
+                else -> isSystemInDarkTheme() // "system"
+            }
+
+            MaterialTheme(colorScheme = if (isDark) darkColorScheme() else lightColorScheme()) {
+                var currentScreen by remember { mutableStateOf(ScreenState.LOGIN) }
+
                 AnimatedContent(
-                    targetState = isLoggedIn, label = "Auth",
+                    targetState = currentScreen,
+                    label = "AppNavigation",
                     transitionSpec = {
-                        if (targetState) (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
+                        if (targetState == ScreenState.APP) (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
                         else (slideInHorizontally { width -> -width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(animationSpec = tween(500)))
                     }
-                ) { targetState ->
-                    if (targetState) MainAppScreen(viewModel, onLogout = { isLoggedIn = false })
-                    else LoginScreen(onLoginSuccess = { isLoggedIn = true })
+                ) { screen ->
+                    when (screen) {
+                        ScreenState.LOGIN -> LoginScreen(viewModel, { currentScreen = ScreenState.APP }, { currentScreen = ScreenState.REGISTER })
+                        ScreenState.REGISTER -> RegisterScreen(viewModel, { currentScreen = ScreenState.LOGIN }, { currentScreen = ScreenState.LOGIN })
+                        ScreenState.APP -> MainAppScreen(viewModel, { viewModel.logout(); currentScreen = ScreenState.LOGIN })
+                    }
                 }
             }
         }
