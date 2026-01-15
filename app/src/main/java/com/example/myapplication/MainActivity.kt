@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +21,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -47,7 +49,7 @@ data class User(
 data class Folder(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val name: String,
-    val ownerUsername: String // NOWOŚĆ: Właściciel folderu
+    val ownerUsername: String
 )
 
 @Entity(
@@ -65,7 +67,7 @@ data class Note(
     val content: String,
     val folderId: Int? = null,
     val isLocked: Boolean = false,
-    val ownerUsername: String // NOWOŚĆ: Właściciel notatki
+    val ownerUsername: String
 )
 
 @Dao
@@ -77,7 +79,21 @@ interface AppDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertUser(user: User)
 
-    // --- NOTATKI (Filtrowane po użytkowniku) ---
+    // NOWOŚĆ: Zmiana hasła
+    @Query("UPDATE users SET password = :newPassword WHERE username = :username")
+    suspend fun updateUserPassword(username: String, newPassword: String)
+
+    // NOWOŚĆ: Usuwanie konta i danych
+    @Query("DELETE FROM users WHERE username = :username")
+    suspend fun deleteUser(username: String)
+
+    @Query("DELETE FROM notes WHERE ownerUsername = :username")
+    suspend fun deleteAllUserNotes(username: String)
+
+    @Query("DELETE FROM folders WHERE ownerUsername = :username")
+    suspend fun deleteAllUserFolders(username: String)
+
+    // --- NOTATKI ---
     @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllNotes(username: String): Flow<List<Note>>
 
@@ -99,7 +115,7 @@ interface AppDao {
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
     suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
 
-    // --- FOLDERY (Filtrowane po użytkowniku) ---
+    // --- FOLDERY ---
     @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllFolders(username: String): Flow<List<Folder>>
 
@@ -110,8 +126,8 @@ interface AppDao {
     suspend fun deleteFolder(folder: Folder)
 }
 
-// Zmiana wersji na 8 (dodano pola ownerUsername)
-@Database(entities = [Note::class, Folder::class, User::class], version = 8, exportSchema = false)
+// Bump wersji do 9 (dodano nowe query, struktura tabel bez zmian, ale dla pewności migracji)
+@Database(entities = [Note::class, Folder::class, User::class], version = 9, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
 
@@ -119,8 +135,8 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile private var INSTANCE: AppDatabase? = null
         fun getDatabase(context: android.content.Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v8")
-                    .fallbackToDestructiveMigration() // Wyczyszczenie bazy przy zmianie struktury
+                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v9")
+                    .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }
         }
@@ -134,11 +150,11 @@ abstract class AppDatabase : RoomDatabase() {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.getDatabase(application).dao()
 
-    // Aktualnie zalogowany użytkownik
     var currentUser by mutableStateOf<User?>(null)
         private set
 
-    // --- LOGOWANIE I REJESTRACJA ---
+    // --- LOGOWANIE, REJESTRACJA, USTAWIENIA ---
+
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
             val existing = dao.getUser(user.username)
@@ -167,33 +183,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentUser = null
     }
 
-    // --- POBIERANIE DANYCH (Tylko dla zalogowanego) ---
+    // NOWOŚĆ: Zmiana hasła
+    fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch {
+        currentUser?.let { user ->
+            dao.updateUserPassword(user.username, newPassword)
+            currentUser = user.copy(password = newPassword) // Aktualizuj lokalny stan
+            onSuccess()
+        }
+    }
 
-    // Zwraca notatki tylko zalogowanego użytkownika
+    // NOWOŚĆ: Usuwanie konta
+    fun deleteAccount(onSuccess: () -> Unit) = viewModelScope.launch {
+        currentUser?.let { user ->
+            // Usuwamy wszystko co związane z użytkownikiem
+            dao.deleteAllUserNotes(user.username)
+            dao.deleteAllUserFolders(user.username)
+            dao.deleteUser(user.username)
+            currentUser = null
+            onSuccess()
+        }
+    }
+
+    // --- NOTATKI I FOLDERY ---
+
     fun getAllNotesForCurrentUser(): Flow<List<Note>> {
         return currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
     }
 
-    // Zwraca foldery tylko zalogowanego użytkownika
     fun getAllFoldersForCurrentUser(): Flow<List<Folder>> {
         return currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
     }
 
-    // Zwraca notatki z folderu (weryfikując właściciela)
     fun getNotesFromFolder(folderId: Int): Flow<List<Note>> {
         return currentUser?.let { dao.getNotesByFolder(folderId, it.username) } ?: emptyFlow()
     }
 
-    // --- OPERACJE (Dodawanie z przypisaniem właściciela) ---
-
     fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
         currentUser?.let { user ->
             dao.insertNote(Note(
-                title = title,
-                content = content,
-                folderId = folderId,
-                isLocked = false,
-                ownerUsername = user.username // Przypisanie do użytkownika
+                title = title, content = content, folderId = folderId,
+                isLocked = false, ownerUsername = user.username
             ))
         }
     }
@@ -214,7 +243,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addFolder(name: String) = viewModelScope.launch {
         currentUser?.let { user ->
-            dao.insertFolder(Folder(name = name, ownerUsername = user.username)) // Przypisanie folderu
+            dao.insertFolder(Folder(name = name, ownerUsername = user.username))
         }
     }
 
@@ -222,7 +251,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 // ==========================================
-// 3. EKRAN LOGOWANIA
+// 3. WIDOKI LOGOWANIA I REJESTRACJI
 // ==========================================
 
 @Composable
@@ -266,10 +295,6 @@ fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigate
     }
 }
 
-// ==========================================
-// 4. EKRAN REJESTRACJI
-// ==========================================
-
 @Composable
 fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
     var username by remember { mutableStateOf("") }
@@ -289,20 +314,17 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
 
         OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Wybierz Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(16.dp))
-
         OutlinedTextField(
             value = password, onValueChange = { password = it }, label = { Text("Hasło") },
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             singleLine = true, modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(16.dp))
-
         OutlinedTextField(
             value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Potwierdź Hasło") },
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             singleLine = true, modifier = Modifier.fillMaxWidth()
         )
-
         Spacer(modifier = Modifier.height(32.dp))
 
         Button(onClick = {
@@ -327,12 +349,13 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
 }
 
 // ==========================================
-// 5. EKRAN GŁÓWNY APLIKACJI
+// 4. GŁÓWNA NAWIGACJA I EKRANY APLIKACJI
 // ==========================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
+    // 0 = Notatki, 1 = Foldery, 2 = Ustawienia
     var selectedTab by remember { mutableIntStateOf(0) }
     var activeFolderId by remember { mutableStateOf<Int?>(null) }
     var activeFolderName by remember { mutableStateOf("") }
@@ -345,7 +368,8 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                 title = {
                     if (activeFolderId != null) Text("Folder: $activeFolderName")
                     else if (selectedTab == 0) Text("NOTES")
-                    else Text("Moje Foldery")
+                    else if (selectedTab == 1) Text("Moje Foldery")
+                    else Text("Ustawienia")
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -359,9 +383,7 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                     }
                 },
                 actions = {
-                    // Wyświetla kto jest zalogowany
-                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
-                        Text(text = viewModel.currentUser?.username ?: "", style = MaterialTheme.typography.labelSmall)
+                    if (selectedTab != 2) { // Na ekranie ustawień nie pokazujemy przycisku wyloguj (jest w środku)
                         TextButton(onClick = onLogout) { Text("Wyloguj") }
                     }
                 }
@@ -370,14 +392,30 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
         bottomBar = {
             if (activeFolderId == null) {
                 NavigationBar {
-                    NavigationBarItem(icon = { Icon(Icons.Default.Description, contentDescription = null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
-                    NavigationBarItem(icon = { Icon(Icons.Default.Folder, contentDescription = null) }, label = { Text("Foldery") }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Default.Description, contentDescription = null) },
+                        label = { Text("Notatki") },
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 }
+                    )
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                        label = { Text("Foldery") },
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 }
+                    )
+                    // NOWA ZAKŁADKA
+                    NavigationBarItem(
+                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                        label = { Text("Ustawienia") },
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 }
+                    )
                 }
             }
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
-            // Przekazujemy klucz "currentUser", aby wymusić odświeżenie przy zmianie usera
             key(viewModel.currentUser) {
                 if (activeFolderId != null) {
                     NotesView(viewModel, folderId = activeFolderId)
@@ -388,6 +426,7 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
                             activeFolderId = folder.id
                             activeFolderName = folder.name
                         })
+                        2 -> SettingsView(viewModel, onLogout) // NOWY EKRAN
                     }
                 }
             }
@@ -395,12 +434,113 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
     }
 }
 
+// --- NOWY EKRAN: USTAWIENIA ---
+@Composable
+fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
+    val context = LocalContext.current
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountDialog by remember { mutableStateOf(false) }
+    var newPassword by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(100.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text("Zalogowany jako:", style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = viewModel.currentUser?.username ?: "Błąd",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+        Divider()
+        Spacer(modifier = Modifier.height(32.dp))
+
+        // Przycisk zmiany hasła
+        OutlinedButton(
+            onClick = { showPasswordDialog = true },
+            modifier = Modifier.fillMaxWidth().height(50.dp)
+        ) {
+            Icon(Icons.Default.LockReset, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Zmień hasło")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Przycisk usuwania konta
+        Button(
+            onClick = { showDeleteAccountDialog = true },
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+        ) {
+            Icon(Icons.Default.DeleteForever, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Usuń konto")
+        }
+
+        // --- Dialog zmiany hasła ---
+        if (showPasswordDialog) {
+            AlertDialog(
+                onDismissRequest = { showPasswordDialog = false; newPassword = "" },
+                title = { Text("Zmiana hasła") },
+                text = {
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it },
+                        label = { Text("Nowe hasło") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (newPassword.isNotBlank()) {
+                            viewModel.changePassword(newPassword) {
+                                Toast.makeText(context, "Hasło zmienione pomyślnie", Toast.LENGTH_SHORT).show()
+                                showPasswordDialog = false
+                                newPassword = ""
+                            }
+                        }
+                    }) { Text("Zapisz") }
+                },
+                dismissButton = { TextButton(onClick = { showPasswordDialog = false }) { Text("Anuluj") } }
+            )
+        }
+
+        // --- Dialog usuwania konta ---
+        if (showDeleteAccountDialog) {
+            AlertDialog(
+                onDismissRequest = { showDeleteAccountDialog = false },
+                title = { Text("Usunąć konto?") },
+                text = { Text("Ta operacja jest nieodwracalna. Wszystkie Twoje notatki i foldery zostaną trwale usunięte.") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.deleteAccount {
+                                showDeleteAccountDialog = false
+                                onLogout() // Wyloguj i wróć do ekranu logowania
+                                Toast.makeText(context, "Konto zostało usunięte", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Tak, usuń") }
+                },
+                dismissButton = { TextButton(onClick = { showDeleteAccountDialog = false }) { Text("Anuluj") } }
+            )
+        }
+    }
+}
+
+// --- WIDOK NOTATEK ---
 @Composable
 fun NotesView(viewModel: MainViewModel, folderId: Int?) {
-    // Pobieramy notatki tylko dla zalogowanego użytkownika
     val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList())
     else viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
-
     val allFolders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     val context = LocalContext.current
     val currentUserPassword = viewModel.currentUser?.password ?: ""
@@ -582,9 +722,9 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     }
 }
 
+// --- WIDOK FOLDERÓW ---
 @Composable
 fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
-    // Pobieramy foldery tylko dla zalogowanego użytkownika
     val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     var showDialog by remember { mutableStateOf(false) }
     var folderName by remember { mutableStateOf("") }
