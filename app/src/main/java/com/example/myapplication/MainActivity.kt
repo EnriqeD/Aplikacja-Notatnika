@@ -33,13 +33,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
 // ==========================================
-// 1. BAZA DANYCH (User, Folder, Note)
+// 1. BAZA DANYCH (Model Danych)
 // ==========================================
 
-// NOWOŚĆ: Tabela Użytkowników
 @Entity(tableName = "users")
 data class User(
-    @PrimaryKey val username: String, // Login jest kluczem (musi być unikalny)
+    @PrimaryKey val username: String,
     val password: String
 )
 
@@ -68,7 +67,7 @@ data class Note(
 
 @Dao
 interface AppDao {
-    // --- UŻYTKOWNICY (NOWOŚĆ) ---
+    // --- UŻYTKOWNICY ---
     @Query("SELECT * FROM users WHERE username = :username LIMIT 1")
     suspend fun getUser(username: String): User?
 
@@ -108,7 +107,6 @@ interface AppDao {
     suspend fun deleteFolder(folder: Folder)
 }
 
-// Zmiana wersji na 7 (dodano tabelę users)
 @Database(entities = [Note::class, Folder::class, User::class], version = 7, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
@@ -126,7 +124,7 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. VIEWMODEL
+// 2. VIEWMODEL (Logika Biznesowa)
 // ==========================================
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -135,10 +133,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val allNotes: Flow<List<Note>> = dao.getAllNotes()
     val allFolders: Flow<List<Folder>> = dao.getAllFolders()
 
-    // --- LOGOWANIE I REJESTRACJA (NOWOŚĆ) ---
+    // NOWOŚĆ: Przechowujemy aktualnie zalogowanego użytkownika
+    var currentUser by mutableStateOf<User?>(null)
+        private set
+
+    // --- LOGOWANIE I REJESTRACJA ---
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
-            // Sprawdź czy użytkownik istnieje
             val existing = dao.getUser(user.username)
             if (existing != null) {
                 onError("Użytkownik o takim loginie już istnieje!")
@@ -154,10 +155,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         val user = dao.getUser(username)
         if (user != null && user.password == password) {
+            // ZAPISUJEMY ZALOGOWANEGO UŻYTKOWNIKA
+            currentUser = user
             onSuccess()
         } else {
             onError("Błędny login lub hasło!")
         }
+    }
+
+    fun logout() {
+        currentUser = null
     }
 
     // --- Notatki i Foldery ---
@@ -186,7 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 // ==========================================
-// 3. EKRAN LOGOWANIA (Zaktualizowany)
+// 3. EKRAN LOGOWANIA
 // ==========================================
 
 @Composable
@@ -226,16 +233,12 @@ fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigate
         }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Wejdź") }
 
         Spacer(modifier = Modifier.height(16.dp))
-
-        // Przycisk przejścia do rejestracji
-        TextButton(onClick = onNavigateToRegister) {
-            Text("Nie masz konta? Zarejestruj się")
-        }
+        TextButton(onClick = onNavigateToRegister) { Text("Nie masz konta? Zarejestruj się") }
     }
 }
 
 // ==========================================
-// 4. EKRAN REJESTRACJI (NOWOŚĆ)
+// 4. EKRAN REJESTRACJI
 // ==========================================
 
 @Composable
@@ -265,7 +268,6 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
         )
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Pole potwierdzenia hasła
         OutlinedTextField(
             value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Potwierdź Hasło") },
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -280,11 +282,10 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
             } else if (password != confirmPassword) {
                 Toast.makeText(context, "Hasła nie są takie same!", Toast.LENGTH_SHORT).show()
             } else {
-                // Próba rejestracji
                 viewModel.registerUser(User(username, password),
                     onSuccess = {
                         Toast.makeText(context, "Konto utworzone! Zaloguj się.", Toast.LENGTH_SHORT).show()
-                        onRegisterSuccess() // Wróć do ekranu logowania
+                        onRegisterSuccess()
                     },
                     onError = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
                 )
@@ -292,10 +293,7 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
         }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Zarejestruj się") }
 
         Spacer(modifier = Modifier.height(16.dp))
-
-        TextButton(onClick = onNavigateToLogin) {
-            Text("Masz już konto? Zaloguj się")
-        }
+        TextButton(onClick = onNavigateToLogin) { Text("Masz już konto? Zaloguj się") }
     }
 }
 
@@ -365,6 +363,9 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     else viewModel.allNotes.collectAsState(initial = emptyList())
     val allFolders by viewModel.allFolders.collectAsState(initial = emptyList())
     val context = LocalContext.current
+
+    // Pobieramy hasło aktualnego użytkownika
+    val currentUserPassword = viewModel.currentUser?.password ?: ""
 
     var showAddDialog by remember { mutableStateOf(false) }
     var noteToEdit by remember { mutableStateOf<Note?>(null) }
@@ -520,12 +521,13 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
                     Column {
                         Text("Aby odszyfrować treść: \"${noteToUnlock?.title}\"")
                         Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedTextField(value = passwordInput, onValueChange = { passwordInput = it }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), label = { Text("Hasło (1234)") })
+                        OutlinedTextField(value = passwordInput, onValueChange = { passwordInput = it }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), label = { Text("Hasło użytkownika") })
                     }
                 },
                 confirmButton = {
                     Button(onClick = {
-                        if (passwordInput == "1234") {
+                        // TUTAJ ZMIANA: Sprawdzamy hasło zalogowanego użytkownika
+                        if (passwordInput == currentUserPassword) {
                             viewModel.toggleLock(noteToUnlock!!)
                             noteToUnlock = null; passwordInput = ""; Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show()
                         } else { Toast.makeText(context, "Błędne hasło!", Toast.LENGTH_SHORT).show() }
@@ -571,14 +573,7 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
     }
 }
 
-// ==========================================
-// 6. MAIN ACTIVITY (Zarządzanie stanem ekranów)
-// ==========================================
-
-// Enum (typ wyliczeniowy) do zarządzania tym, który ekran wyświetlać
-enum class ScreenState {
-    LOGIN, REGISTER, APP
-}
+enum class ScreenState { LOGIN, REGISTER, APP }
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
@@ -587,20 +582,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
-                // Stan określający aktualny ekran: LOGIN, REGISTER lub APP
                 var currentScreen by remember { mutableStateOf(ScreenState.LOGIN) }
 
                 AnimatedContent(
                     targetState = currentScreen,
                     label = "AppNavigation",
                     transitionSpec = {
-                        // Animacje przejść (Slide + Fade)
                         if (targetState == ScreenState.APP) {
-                            (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500)))
-                                .togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
+                            (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
                         } else {
-                            (slideInHorizontally { width -> -width } + fadeIn(animationSpec = tween(500)))
-                                .togetherWith(slideOutHorizontally { width -> width } + fadeOut(animationSpec = tween(500)))
+                            (slideInHorizontally { width -> -width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(animationSpec = tween(500)))
                         }
                     }
                 ) { screen ->
@@ -612,12 +603,15 @@ class MainActivity : ComponentActivity() {
                         )
                         ScreenState.REGISTER -> RegisterScreen(
                             viewModel = viewModel,
-                            onRegisterSuccess = { currentScreen = ScreenState.LOGIN }, // Po rejestracji idź do logowania
+                            onRegisterSuccess = { currentScreen = ScreenState.LOGIN },
                             onNavigateToLogin = { currentScreen = ScreenState.LOGIN }
                         )
                         ScreenState.APP -> MainAppScreen(
                             viewModel = viewModel,
-                            onLogout = { currentScreen = ScreenState.LOGIN }
+                            onLogout = {
+                                viewModel.logout()
+                                currentScreen = ScreenState.LOGIN
+                            }
                         )
                     }
                 }
