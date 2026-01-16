@@ -52,9 +52,17 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 // ==========================================
-// 1. BAZA DANYCH
+// 1. BAZA DANYCH (Model Danych)
 // ==========================================
 
+/**
+ * Reprezentuje użytkownika aplikacji.
+ * Tabela w bazie danych: "users".
+ *
+ * @property username Unikalna nazwa użytkownika, służy jako klucz główny.
+ * @property password Hasło użytkownika (przechowywane jako zwykły tekst - w produkcji warto haszować).
+ * @property theme Preferowany motyw użytkownika ("light", "dark", "system", "sensor").
+ */
 @Entity(tableName = "users")
 data class User(
     @PrimaryKey val username: String,
@@ -62,6 +70,15 @@ data class User(
     val theme: String = "system"
 )
 
+/**
+ * Reprezentuje folder grupujący notatki.
+ * Tabela w bazie danych: "folders".
+ *
+ * @property id Unikalny identyfikator folderu (generowany automatycznie).
+ * @property name Nazwa folderu.
+ * @property ownerUsername Nazwa użytkownika, do którego należy folder (klucz obcy logiczny).
+ * @property color Kolor folderu (np. "white", "blue", "gold").
+ */
 @Entity(tableName = "folders")
 data class Folder(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -70,6 +87,19 @@ data class Folder(
     val color: String = "white"
 )
 
+/**
+ * Reprezentuje pojedynczą notatkę.
+ * Tabela w bazie danych: "notes".
+ * Relacja: Powiązana z tabelą Folder (klucz obcy folderId). Usunięcie folderu usuwa notatki (CASCADE).
+ *
+ * @property id Unikalny identyfikator notatki.
+ * @property title Tytuł notatki.
+ * @property content Treść notatki.
+ * @property folderId ID folderu, do którego należy notatka (może być null, wtedy "Ogólne").
+ * @property isLocked Czy notatka jest zablokowana hasłem.
+ * @property ownerUsername Właściciel notatki.
+ * @property isFavorite Czy notatka jest dodana do ulubionych.
+ */
 @Entity(
     tableName = "notes",
     foreignKeys = [ForeignKey(
@@ -86,67 +116,98 @@ data class Note(
     val folderId: Int? = null,
     val isLocked: Boolean = false,
     val ownerUsername: String,
-    val isFavorite: Boolean = false // NOWOŚĆ: Flaga ulubionych
+    val isFavorite: Boolean = false
 )
 
+/**
+ * Interfejs dostępu do danych (Data Access Object).
+ * Zawiera metody do komunikacji z bazą danych Room.
+ */
 @Dao
 interface AppDao {
+    // --- UŻYTKOWNICY ---
+
+    /** Pobiera użytkownika na podstawie nazwy. */
     @Query("SELECT * FROM users WHERE username = :username LIMIT 1")
     suspend fun getUser(username: String): User?
+
+    /** Dodaje nowego użytkownika. Zwraca błąd w przypadku duplikatu. */
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertUser(user: User)
+
+    /** Aktualizuje hasło użytkownika. */
     @Query("UPDATE users SET password = :newPassword WHERE username = :username")
     suspend fun updateUserPassword(username: String, newPassword: String)
+
+    /** Aktualizuje motyw użytkownika. */
     @Query("UPDATE users SET theme = :theme WHERE username = :username")
     suspend fun updateUserTheme(username: String, theme: String)
+
+    /** Usuwa użytkownika z bazy. */
     @Query("DELETE FROM users WHERE username = :username")
     suspend fun deleteUser(username: String)
 
+    // --- CZYSZCZENIE DANYCH ---
+
     @Query("DELETE FROM notes WHERE ownerUsername = :username")
     suspend fun deleteAllUserNotes(username: String)
+
     @Query("DELETE FROM folders WHERE ownerUsername = :username")
     suspend fun deleteAllUserFolders(username: String)
 
     // --- NOTATKI ---
+
+    /** Pobiera wszystkie notatki danego użytkownika. */
     @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllNotes(username: String): Flow<List<Note>>
 
-    // Zwykłe notatki z folderu
+    /** Pobiera notatki z konkretnego folderu dla danego użytkownika. */
     @Query("SELECT * FROM notes WHERE folderId = :folderId AND ownerUsername = :username ORDER BY id DESC")
     fun getNotesByFolder(folderId: Int, username: String): Flow<List<Note>>
 
-    // NOWOŚĆ: Pobierz tylko ulubione
+    /** Pobiera tylko notatki oznaczone jako ulubione. */
     @Query("SELECT * FROM notes WHERE isFavorite = 1 AND ownerUsername = :username ORDER BY id DESC")
     fun getFavoriteNotes(username: String): Flow<List<Note>>
 
     @Insert
     suspend fun insertNote(note: Note)
+
     @Delete
     suspend fun deleteNote(note: Note)
 
     @Query("UPDATE notes SET title = :title, content = :content WHERE id = :id")
     suspend fun updateNoteContent(id: Int, title: String, content: String)
+
     @Query("UPDATE notes SET folderId = :folderId WHERE id = :noteId")
     suspend fun updateNoteFolder(noteId: Int, folderId: Int?)
+
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
     suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
 
-    // NOWOŚĆ: Przełączanie ulubionych
+    /** Przełącza flagę ulubionych dla notatki. */
     @Query("UPDATE notes SET isFavorite = :isFavorite WHERE id = :noteId")
     suspend fun updateNoteFavorite(noteId: Int, isFavorite: Boolean)
 
     // --- FOLDERY ---
+
     @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllFolders(username: String): Flow<List<Folder>>
+
     @Insert
     suspend fun insertFolder(folder: Folder)
+
     @Delete
     suspend fun deleteFolder(folder: Folder)
+
+    /** Aktualizuje nazwę i kolor folderu. */
     @Query("UPDATE folders SET name = :name, color = :color WHERE id = :id")
     suspend fun updateFolder(id: Int, name: String, color: String)
 }
 
-// Wersja 12 - dodano isFavorite
+/**
+ * Główna baza danych aplikacji.
+ * @property version Wersja bazy danych (obecnie 12).
+ */
 @Database(entities = [Note::class, Folder::class, User::class], version = 12, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
@@ -155,7 +216,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v12")
-                    .fallbackToDestructiveMigration()
+                    .fallbackToDestructiveMigration() // UWAGA: Czyści bazę przy zmianie wersji
                     .build().also { INSTANCE = it }
             }
         }
@@ -163,45 +224,69 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. VIEWMODEL
+// 2. VIEWMODEL (Logika Biznesowa)
 // ==========================================
 
+/**
+ * ViewModel zarządzający stanem UI i komunikacją z bazą danych.
+ * Przechowuje informację o zalogowanym użytkowniku i odczytach sensora.
+ */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.getDatabase(application).dao()
+
+    /** Aktualnie zalogowany użytkownik. Null, jeśli nikt nie jest zalogowany. */
     var currentUser by mutableStateOf<User?>(null)
         private set
+
+    /** Aktualny odczyt z czujnika światła (w luksach). */
     var currentLuxValue by mutableFloatStateOf(0f)
 
-    // Stała identyfikująca wirtualny folder "Ulubione"
+    /** ID wirtualnego folderu "Ulubione". */
     val FAVORITES_FOLDER_ID = -1
 
+    // --- LOGOWANIE I REJESTRACJA ---
+
+    /** Rejestruje nowego użytkownika. */
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
             if (dao.getUser(user.username) != null) onError("Użytkownik już istnieje!")
             else { dao.insertUser(user); onSuccess() }
         } catch (e: Exception) { onError("Błąd: ${e.message}") }
     }
+
+    /** Loguje użytkownika sprawdzając hasło. */
     fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         val user = dao.getUser(username)
         if (user != null && user.password == password) { currentUser = user; onSuccess() }
         else onError("Błędny login lub hasło!")
     }
+
     fun logout() { currentUser = null }
+
+    // --- ZARZĄDZANIE KONTEM ---
+
     fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch {
         currentUser?.let { user -> dao.updateUserPassword(user.username, newPassword); currentUser = user.copy(password = newPassword); onSuccess() }
     }
+
     fun changeTheme(newTheme: String) = viewModelScope.launch {
         currentUser?.let { user -> dao.updateUserTheme(user.username, newTheme); currentUser = user.copy(theme = newTheme) }
     }
+
+    /** Usuwa konto użytkownika wraz ze wszystkimi danymi. */
     fun deleteAccount(onSuccess: () -> Unit) = viewModelScope.launch {
         currentUser?.let { user -> dao.deleteAllUserNotes(user.username); dao.deleteAllUserFolders(user.username); dao.deleteUser(user.username); currentUser = null; onSuccess() }
     }
 
-    // --- LOGIKA POBIERANIA NOTATEK ---
+    // --- POBIERANIE DANYCH ---
+
     fun getAllNotesForCurrentUser() = currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
     fun getAllFoldersForCurrentUser() = currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
 
-    // Tutaj logika: jeśli folderId == -1, pobierz ulubione, w przeciwnym razie pobierz z folderu
+    /**
+     * Pobiera notatki w zależności od kontekstu.
+     * @param folderId ID folderu. Jeśli null -> wszystkie. Jeśli -1 -> ulubione.
+     */
     fun getNotesByContext(folderId: Int?): Flow<List<Note>> {
         val user = currentUser ?: return emptyFlow()
         return if (folderId == FAVORITES_FOLDER_ID) {
@@ -209,14 +294,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else if (folderId != null) {
             dao.getNotesByFolder(folderId, user.username)
         } else {
-            // "Wszystkie notatki" (zakładka Notatki)
             dao.getAllNotes(user.username)
         }
     }
 
+    // --- OPERACJE NA NOTATKACH ---
+
     fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
-        // Jeśli jesteśmy w folderze Ulubione (-1), dodaj notatkę bez folderu, ale jako ulubioną
-        // Jeśli w innym, dodaj normalnie
         currentUser?.let { user ->
             val realFolderId = if(folderId == FAVORITES_FOLDER_ID) null else folderId
             val isFav = (folderId == FAVORITES_FOLDER_ID)
@@ -228,10 +312,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun moveNote(note: Note, fId: Int?) = viewModelScope.launch { dao.updateNoteFolder(note.id, fId) }
     fun toggleLock(note: Note) = viewModelScope.launch { dao.updateNoteLock(note.id, !note.isLocked) }
 
-    // NOWOŚĆ: Przełączanie gwiazdki
+    /** Dodaje lub usuwa notatkę z ulubionych. */
     fun toggleFavorite(note: Note) = viewModelScope.launch {
         dao.updateNoteFavorite(note.id, !note.isFavorite)
     }
+
+    // --- OPERACJE NA FOLDERACH ---
 
     fun addFolder(name: String, color: String) = viewModelScope.launch {
         currentUser?.let { dao.insertFolder(Folder(name = name, ownerUsername = it.username, color = color)) }
@@ -241,9 +327,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 // ==========================================
-// 3. UI helpers
+// 3. UI helpers (Funkcje pomocnicze)
 // ==========================================
 
+/** Zwraca obiekt Color na podstawie nazwy string (np. "blue"). */
 fun getFolderColor(colorName: String): Color {
     return when(colorName) {
         "black" -> Color.Black
@@ -251,11 +338,12 @@ fun getFolderColor(colorName: String): Color {
         "green" -> Color(0xFF4CAF50)
         "yellow" -> Color(0xFFFFEB3B)
         "orange" -> Color(0xFFFF9800)
-        "gold" -> Color(0xFFFFD700) // Dla folderu ulubione
+        "gold" -> Color(0xFFFFD700) // Specjalny kolor dla ulubionych
         else -> Color.White
     }
 }
 
+/** Określa czy tekst na danym tle powinien być biały czy czarny dla kontrastu. */
 fun getContentColorForFolder(colorName: String): Color {
     return when(colorName) {
         "black", "blue" -> Color.White
@@ -263,6 +351,7 @@ fun getContentColorForFolder(colorName: String): Color {
     }
 }
 
+/** Komponent wyboru koloru (kółeczka). */
 @Composable
 fun ColorPicker(selectedColor: String, onColorSelected: (String) -> Unit) {
     val colors = listOf("white", "black", "blue", "green", "yellow", "orange")
@@ -274,9 +363,13 @@ fun ColorPicker(selectedColor: String, onColorSelected: (String) -> Unit) {
 }
 
 // ==========================================
-// 4. UI SCREENS
+// 4. EKRANY UI
 // ==========================================
 
+/**
+ * Ekran logowania.
+ * Umożliwia wpisanie loginu i hasła oraz przejście do rejestracji.
+ */
 @Composable
 fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigateToRegister: () -> Unit) {
     var username by remember { mutableStateOf("") }
@@ -296,6 +389,10 @@ fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigate
     }
 }
 
+/**
+ * Ekran rejestracji.
+ * Tworzy nowe konto użytkownika.
+ */
 @Composable
 fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
     var username by remember { mutableStateOf("") }
@@ -322,6 +419,10 @@ fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNa
     }
 }
 
+/**
+ * Główny ekran aplikacji (po zalogowaniu).
+ * Zarządza nawigacją dolną (Notatki, Foldery, Ustawienia).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
@@ -366,6 +467,10 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
     }
 }
 
+/**
+ * Ekran ustawień.
+ * Pozwala na zmianę motywu, hasła oraz usunięcie konta.
+ */
 @Composable
 fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
     val context = LocalContext.current
@@ -403,9 +508,14 @@ fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
     }
 }
 
+/**
+ * Ekran listy notatek.
+ * Obsługuje wyświetlanie notatek, dodawanie nowych i ich edycję.
+ *
+ * @param folderId ID folderu do wyświetlenia (null = wszystkie, -1 = ulubione).
+ */
 @Composable
 fun NotesView(viewModel: MainViewModel, folderId: Int?) {
-    // Pobieramy notatki w zależności od kontekstu (wszystkie, folder, czy ulubione)
     val notes by viewModel.getNotesByContext(folderId).collectAsState(initial = emptyList())
     val allFolders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     var showAdd by remember { mutableStateOf(false) }
@@ -437,6 +547,10 @@ fun NotesView(viewModel: MainViewModel, folderId: Int?) {
     }
 }
 
+/**
+ * Pojedynczy element listy notatek.
+ * Zawiera rozwijane menu (akordeon) z opcjami edycji, usuwania i szyfrowania.
+ */
 @Composable
 fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
     val context = LocalContext.current
@@ -466,9 +580,9 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
                     Text(folderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
                 }
 
-                // --- SEKCJA PRZYCISKÓW (GWIAZDKA + MENU) ---
+                // --- SEKCJA PRZYCISKÓW ---
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 1. Gwiazdka (Ulubione)
+                    // Gwiazdka
                     IconButton(onClick = { viewModel.toggleFavorite(note) }) {
                         Icon(
                             imageVector = if(note.isFavorite) Icons.Default.Star else Icons.Outlined.StarBorder,
@@ -476,8 +590,7 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
                             tint = if(note.isFavorite) Color(0xFFFFD700) else MaterialTheme.colorScheme.outline
                         )
                     }
-
-                    // 2. Menu (3 kropki)
+                    // Menu rozwijane
                     IconButton(onClick = { isMenuExpanded = !isMenuExpanded }) {
                         Icon(imageVector = if (isMenuExpanded) Icons.Default.ExpandLess else Icons.Default.MoreVert, contentDescription = "Opcje")
                     }
@@ -503,10 +616,13 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
     if (toMove) { AlertDialog(onDismissRequest = { toMove = false }, title = { Text("Przenieś do") }, text = { LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) { item { ListItem(headlineContent = { Text("Brak folderu", fontWeight = FontWeight.Bold) }, modifier = Modifier.clickable { viewModel.moveNote(note, null); toMove = false }); Divider() }; items(allFolders) { folder -> ListItem(headlineContent = { Text(folder.name) }, leadingContent = { Icon(Icons.Default.Folder, null) }, modifier = Modifier.clickable { viewModel.moveNote(note, folder.id); toMove = false }) } } }, confirmButton = { TextButton({ toMove = false }) { Text("Anuluj") } }) }
 }
 
+/**
+ * Ekran listy folderów.
+ * Wyświetla folder "Ulubione" (jeśli istnieje) oraz foldery użytkownika.
+ */
 @Composable
 fun FoldersView(viewModel: MainViewModel, onFolderClick: (Int, String) -> Unit) {
     val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
-    // Pobieramy WSZYSTKIE notatki, żeby sprawdzić czy istnieje jakakolwiek ulubiona
     val allNotes by viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
     val hasFavorites = allNotes.any { it.isFavorite }
 
@@ -516,15 +632,14 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Int, String) -> Unit) 
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn {
-            // 1. Wirtualny folder "Ulubione" (tylko jeśli są jakieś ulubione)
+            // 1. Folder Ulubione (warunkowy)
             if (hasFavorites) {
                 item {
                     val favFolder = Folder(id = viewModel.FAVORITES_FOLDER_ID, name = "Ulubione", ownerUsername = "", color = "gold")
                     FolderItem(favFolder, viewModel, onClick = { onFolderClick(it.id, it.name) })
                 }
             }
-
-            // 2. Normalne foldery
+            // 2. Reszta folderów
             items(folders) { f ->
                 FolderItem(f, viewModel, onClick = { onFolderClick(it.id, it.name) })
             }
@@ -553,8 +668,6 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
 
     val backgroundColor = getFolderColor(folder.color)
     val contentColor = getContentColorForFolder(folder.color)
-
-    // Jeśli to wirtualny folder ulubione, zablokuj edycję i usuwanie w menu
     val isVirtualFavorites = (folder.id == viewModel.FAVORITES_FOLDER_ID)
 
     Card(
@@ -569,7 +682,6 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
                     Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = contentColor)
                 }
 
-                // Ukryj menu dla folderu wirtualnego
                 if (!isVirtualFavorites) {
                     IconButton(onClick = { isMenuExpanded = !isMenuExpanded }) {
                         Icon(imageVector = if (isMenuExpanded) Icons.Default.ExpandLess else Icons.Default.MoreVert, contentDescription = "Opcje", tint = contentColor)
@@ -601,6 +713,10 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
         )
     }
 }
+
+// ==========================================
+// 5. MAIN ACTIVITY
+// ==========================================
 
 enum class ScreenState { LOGIN, REGISTER, APP }
 
