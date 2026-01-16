@@ -659,7 +659,7 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
 }
 
 // ==========================================
-// 5. MAIN ACTIVITY (Wejście do aplikacji)
+// 5. MAIN ACTIVITY (Wejście do aplikacji.)
 // ==========================================
 
 /**
@@ -690,3 +690,5 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+
