@@ -1,6 +1,11 @@
-package com.example.myapplication // <--- ZACHOWAJ SWOJĄ NAZWĘ PAKIETU!
+package com.example.myapplication
 
 import android.app.Application
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -32,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
@@ -44,7 +50,7 @@ import kotlinx.coroutines.launch
 data class User(
     @PrimaryKey val username: String,
     val password: String,
-    val theme: String = "system" // NOWOŚĆ: "light", "dark" lub "system"
+    val theme: String = "system"
 )
 
 @Entity(tableName = "folders")
@@ -74,7 +80,6 @@ data class Note(
 
 @Dao
 interface AppDao {
-    // --- UŻYTKOWNICY ---
     @Query("SELECT * FROM users WHERE username = :username LIMIT 1")
     suspend fun getUser(username: String): User?
 
@@ -84,7 +89,6 @@ interface AppDao {
     @Query("UPDATE users SET password = :newPassword WHERE username = :username")
     suspend fun updateUserPassword(username: String, newPassword: String)
 
-    // NOWOŚĆ: Aktualizacja motywu
     @Query("UPDATE users SET theme = :theme WHERE username = :username")
     suspend fun updateUserTheme(username: String, theme: String)
 
@@ -97,7 +101,6 @@ interface AppDao {
     @Query("DELETE FROM folders WHERE ownerUsername = :username")
     suspend fun deleteAllUserFolders(username: String)
 
-    // --- NOTATKI ---
     @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllNotes(username: String): Flow<List<Note>>
 
@@ -119,7 +122,6 @@ interface AppDao {
     @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
     suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
 
-    // --- FOLDERY ---
     @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllFolders(username: String): Flow<List<Folder>>
 
@@ -130,14 +132,13 @@ interface AppDao {
     suspend fun deleteFolder(folder: Folder)
 }
 
-// Wersja 10 - dodano pole theme w tabeli users
 @Database(entities = [Note::class, Folder::class, User::class], version = 10, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
-        fun getDatabase(context: android.content.Context): AppDatabase {
+        fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v10")
                     .fallbackToDestructiveMigration()
@@ -157,20 +158,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var currentUser by mutableStateOf<User?>(null)
         private set
 
-    // --- LOGOWANIE, REJESTRACJA, USTAWIENIA ---
+    var currentLuxValue by mutableFloatStateOf(0f)
 
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
-            val existing = dao.getUser(user.username)
-            if (existing != null) {
-                onError("Użytkownik o takim loginie już istnieje!")
-            } else {
-                dao.insertUser(user)
-                onSuccess()
-            }
-        } catch (e: Exception) {
-            onError("Błąd rejestracji: ${e.message}")
-        }
+            if (dao.getUser(user.username) != null) onError("Użytkownik już istnieje!")
+            else { dao.insertUser(user); onSuccess() }
+        } catch (e: Exception) { onError("Błąd: ${e.message}") }
     }
 
     fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
@@ -178,14 +172,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (user != null && user.password == password) {
             currentUser = user
             onSuccess()
-        } else {
-            onError("Błędny login lub hasło!")
-        }
+        } else onError("Błędny login lub hasło!")
     }
 
-    fun logout() {
-        currentUser = null
-    }
+    fun logout() { currentUser = null }
 
     fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch {
         currentUser?.let { user ->
@@ -195,11 +185,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // NOWOŚĆ: Zmiana motywu
     fun changeTheme(newTheme: String) = viewModelScope.launch {
         currentUser?.let { user ->
             dao.updateUserTheme(user.username, newTheme)
-            currentUser = user.copy(theme = newTheme) // Odśwież stan lokalny, aby UI zareagowało
+            currentUser = user.copy(theme = newTheme)
         }
     }
 
@@ -213,28 +202,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- NOTATKI I FOLDERY ---
-
-    fun getAllNotesForCurrentUser(): Flow<List<Note>> = currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
-    fun getAllFoldersForCurrentUser(): Flow<List<Folder>> = currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
-    fun getNotesFromFolder(folderId: Int): Flow<List<Note>> = currentUser?.let { dao.getNotesByFolder(folderId, it.username) } ?: emptyFlow()
-
-    fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
-        currentUser?.let { user ->
-            dao.insertNote(Note(title = title, content = content, folderId = folderId, isLocked = false, ownerUsername = user.username))
-        }
-    }
-
-    fun updateNote(id: Int, title: String, content: String) = viewModelScope.launch { dao.updateNoteContent(id, title, content) }
+    fun getAllNotesForCurrentUser() = currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
+    fun getAllFoldersForCurrentUser() = currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
+    fun getNotesFromFolder(folderId: Int) = currentUser?.let { dao.getNotesByFolder(folderId, it.username) } ?: emptyFlow()
+    fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch { currentUser?.let { dao.insertNote(Note(title = title, content = content, folderId = folderId, ownerUsername = it.username)) } }
+    fun updateNote(id: Int, t: String, c: String) = viewModelScope.launch { dao.updateNoteContent(id, t, c) }
     fun deleteNote(note: Note) = viewModelScope.launch { dao.deleteNote(note) }
-    fun moveNote(note: Note, folderId: Int?) = viewModelScope.launch { dao.updateNoteFolder(note.id, folderId) }
+    fun moveNote(note: Note, fId: Int?) = viewModelScope.launch { dao.updateNoteFolder(note.id, fId) }
     fun toggleLock(note: Note) = viewModelScope.launch { dao.updateNoteLock(note.id, !note.isLocked) }
-    fun addFolder(name: String) = viewModelScope.launch { currentUser?.let { user -> dao.insertFolder(Folder(name = name, ownerUsername = user.username)) } }
+    fun addFolder(name: String) = viewModelScope.launch { currentUser?.let { dao.insertFolder(Folder(name = name, ownerUsername = it.username)) } }
     fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
 }
 
 // ==========================================
-// 3. WIDOKI LOGOWANIA I REJESTRACJI
+// 3. UI
 // ==========================================
 
 @Composable
@@ -243,36 +224,15 @@ fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigate
     var password by remember { mutableStateOf("") }
     val context = LocalContext.current
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Zaloguj się", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(32.dp))
-
-        OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(modifier = Modifier.height(16.dp))
-        OutlinedTextField(
-            value = password, onValueChange = { password = it }, label = { Text("Hasło") },
-            visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            singleLine = true, modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(onClick = {
-            if (username.isNotBlank() && password.isNotBlank()) {
-                viewModel.loginUser(username, password,
-                    onSuccess = onLoginSuccess,
-                    onError = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
-                )
-            } else { Toast.makeText(context, "Wpisz login i hasło", Toast.LENGTH_SHORT).show() }
-        }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Wejdź") }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        TextButton(onClick = onNavigateToRegister) { Text("Nie masz konta? Zarejestruj się") }
+    Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.Lock, null, Modifier.size(80.dp), MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(24.dp)); Text("Zaloguj się", style = MaterialTheme.typography.headlineMedium); Spacer(Modifier.height(32.dp))
+        OutlinedTextField(username, { username = it }, label = { Text("Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(password, { password = it }, label = { Text("Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(32.dp))
+        Button({ if (username.isNotBlank() && password.isNotBlank()) viewModel.loginUser(username, password, onLoginSuccess, { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }) else Toast.makeText(context, "Uzupełnij dane", Toast.LENGTH_SHORT).show() }, Modifier.fillMaxWidth().height(50.dp)) { Text("Wejdź") }
+        Spacer(Modifier.height(16.dp)); TextButton(onNavigateToRegister) { Text("Nie masz konta? Zarejestruj się") }
     }
 }
 
@@ -280,45 +240,26 @@ fun LoginScreen(viewModel: MainViewModel, onLoginSuccess: () -> Unit, onNavigate
 fun RegisterScreen(viewModel: MainViewModel, onRegisterSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var confirmPassword by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
     val context = LocalContext.current
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(80.dp), tint = MaterialTheme.colorScheme.secondary)
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Załóż konto", style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(32.dp))
-
-        OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("Wybierz Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(modifier = Modifier.height(16.dp))
-        OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(modifier = Modifier.height(16.dp))
-        OutlinedTextField(value = confirmPassword, onValueChange = { confirmPassword = it }, label = { Text("Potwierdź Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(onClick = {
-            if (username.isBlank() || password.isBlank()) { Toast.makeText(context, "Uzupełnij wszystkie pola", Toast.LENGTH_SHORT).show() }
-            else if (password != confirmPassword) { Toast.makeText(context, "Hasła nie są takie same!", Toast.LENGTH_SHORT).show() }
-            else {
-                viewModel.registerUser(User(username, password),
-                    onSuccess = { Toast.makeText(context, "Konto utworzone! Zaloguj się.", Toast.LENGTH_SHORT).show(); onRegisterSuccess() },
-                    onError = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
-                )
-            }
-        }, modifier = Modifier.fillMaxWidth().height(50.dp)) { Text("Zarejestruj się") }
-
-        Spacer(modifier = Modifier.height(16.dp))
-        TextButton(onClick = onNavigateToLogin) { Text("Masz już konto? Zaloguj się") }
+    Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.PersonAdd, null, Modifier.size(80.dp), MaterialTheme.colorScheme.secondary)
+        Spacer(Modifier.height(24.dp)); Text("Załóż konto", style = MaterialTheme.typography.headlineMedium); Spacer(Modifier.height(32.dp))
+        OutlinedTextField(username, { username = it }, label = { Text("Login") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(password, { password = it }, label = { Text("Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(confirm, { confirm = it }, label = { Text("Potwierdź") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(32.dp))
+        Button({
+            if (username.isBlank() || password.isBlank()) Toast.makeText(context, "Błąd", Toast.LENGTH_SHORT).show()
+            else if (password != confirm) Toast.makeText(context, "Hasła różne", Toast.LENGTH_SHORT).show()
+            else viewModel.registerUser(User(username, password), { Toast.makeText(context, "Sukces", Toast.LENGTH_SHORT).show(); onRegisterSuccess() }, { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() })
+        }, Modifier.fillMaxWidth().height(50.dp)) { Text("Zarejestruj się") }
+        Spacer(Modifier.height(16.dp)); TextButton(onNavigateToLogin) { Text("Logowanie") }
     }
 }
-
-// ==========================================
-// 4. GŁÓWNA STRUKTURA APLIKACJI
-// ==========================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -334,231 +275,138 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit) {
             TopAppBar(
                 title = {
                     if (activeFolderId != null) Text("Folder: $activeFolderName")
-                    else if (selectedTab == 0) Text("NOTES")
-                    else if (selectedTab == 1) Text("Moje Foldery")
-                    else Text("Ustawienia")
+                    else when(selectedTab) { 0 -> Text("NOTES"); 1 -> Text("Foldery"); else -> Text("Ustawienia") }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                ),
-                navigationIcon = {
-                    if (activeFolderId != null) {
-                        IconButton(onClick = { activeFolderId = null }) { Icon(Icons.Default.ArrowBack, contentDescription = "Wróć") }
-                    }
-                },
-                actions = { if (selectedTab != 2) TextButton(onClick = onLogout) { Text("Wyloguj") } }
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer, titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+                navigationIcon = { if (activeFolderId != null) IconButton({ activeFolderId = null }) { Icon(Icons.Default.ArrowBack, "Wróć") } },
+                actions = { if (selectedTab != 2) TextButton(onLogout) { Text("Wyloguj") } }
             )
         },
         bottomBar = {
             if (activeFolderId == null) {
                 NavigationBar {
-                    NavigationBarItem(icon = { Icon(Icons.Default.Description, contentDescription = null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
-                    NavigationBarItem(icon = { Icon(Icons.Default.Folder, contentDescription = null) }, label = { Text("Foldery") }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
-                    NavigationBarItem(icon = { Icon(Icons.Default.Settings, contentDescription = null) }, label = { Text("Ustawienia") }, selected = selectedTab == 2, onClick = { selectedTab = 2 })
+                    NavigationBarItem(icon = { Icon(Icons.Default.Description, null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
+                    NavigationBarItem(icon = { Icon(Icons.Default.Folder, null) }, label = { Text("Foldery") }, selected = selectedTab == 1, onClick = { selectedTab = 1 })
+                    NavigationBarItem(icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Ustawienia") }, selected = selectedTab == 2, onClick = { selectedTab = 2 })
                 }
             }
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
+        Box(Modifier.padding(padding)) {
             key(viewModel.currentUser) {
-                if (activeFolderId != null) {
-                    NotesView(viewModel, folderId = activeFolderId)
-                } else {
-                    when (selectedTab) {
-                        0 -> NotesView(viewModel, folderId = null)
-                        1 -> FoldersView(viewModel, onFolderClick = { folder -> activeFolderId = folder.id; activeFolderName = folder.name })
-                        2 -> SettingsView(viewModel, onLogout)
-                    }
+                if (activeFolderId != null) NotesView(viewModel, activeFolderId)
+                else when(selectedTab) {
+                    0 -> NotesView(viewModel, null)
+                    1 -> FoldersView(viewModel, { activeFolderId = it.id; activeFolderName = it.name })
+                    2 -> SettingsView(viewModel, onLogout)
                 }
             }
         }
     }
 }
 
-// --- EKRAN USTAWIENIA (Z Wyborem Motywu) ---
 @Composable
 fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
     val context = LocalContext.current
-    var showPasswordDialog by remember { mutableStateOf(false) }
-    var showDeleteAccountDialog by remember { mutableStateOf(false) }
-    var newPassword by remember { mutableStateOf("") }
-
-    // Pobranie aktualnego motywu użytkownika
+    var showPwdDialog by remember { mutableStateOf(false) }
+    var showDelDialog by remember { mutableStateOf(false) }
+    var newPwd by remember { mutableStateOf("") }
     val currentTheme = viewModel.currentUser?.theme ?: "system"
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(100.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(modifier = Modifier.height(16.dp))
-        Text("Zalogowany jako:", style = MaterialTheme.typography.bodyLarge)
-        Text(text = viewModel.currentUser?.username ?: "Błąd", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+    Column(Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.AccountCircle, null, Modifier.size(100.dp), MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(16.dp))
+        Text("Użytkownik: ${viewModel.currentUser?.username}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(24.dp)); Divider(); Spacer(Modifier.height(16.dp))
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Divider()
-
-        // --- SEKCJA MOTYWU ---
-        Spacer(modifier = Modifier.height(16.dp))
         Text("Motyw aplikacji", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(Modifier.height(8.dp))
 
-        Column(modifier = Modifier.fillMaxWidth()) {
-            val themes = listOf("system" to "Systemowy", "light" to "Jasny", "dark" to "Ciemny")
+        val themes = listOf("system" to "Systemowy", "light" to "Jasny", "dark" to "Ciemny", "sensor" to "Automatyczny (Czujnik)")
+        Column(Modifier.fillMaxWidth()) {
             themes.forEach { (key, label) ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .selectable(
-                            selected = (currentTheme == key),
-                            onClick = { viewModel.changeTheme(key) },
-                            role = Role.RadioButton
-                        )
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = (currentTheme == key),
-                        onClick = null // null, bo obsługuje to Row
-                    )
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(start = 16.dp)
-                    )
+                Row(Modifier.fillMaxWidth().height(48.dp).selectable(selected = (currentTheme == key), onClick = { viewModel.changeTheme(key) }, role = Role.RadioButton).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = (currentTheme == key), onClick = null)
+                    Text(text = label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(start = 16.dp))
                 }
+            }
+            if (currentTheme == "sensor") {
+                Text("Aktualne światło: ${viewModel.currentLuxValue} lux (Próg: 20.0 lux)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary, modifier = Modifier.padding(start = 16.dp, top = 4.dp))
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Divider()
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(Modifier.height(24.dp)); Divider(); Spacer(Modifier.height(24.dp))
+        OutlinedButton({ showPwdDialog = true }, Modifier.fillMaxWidth().height(50.dp)) { Text("Zmień hasło") }
+        Spacer(Modifier.height(16.dp))
+        Button({ showDelDialog = true }, Modifier.fillMaxWidth().height(50.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Usuń konto") }
 
-        // Przyciski akcji
-        OutlinedButton(onClick = { showPasswordDialog = true }, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-            Icon(Icons.Default.LockReset, contentDescription = null); Spacer(modifier = Modifier.width(8.dp))
-            Text("Zmień hasło")
+        if (showPwdDialog) {
+            AlertDialog(onDismissRequest = { showPwdDialog = false }, title = { Text("Zmiana hasła") }, text = { OutlinedTextField(newPwd, { newPwd = it }, label = { Text("Nowe hasło") }) }, confirmButton = { Button({ if(newPwd.isNotBlank()) viewModel.changePassword(newPwd) { showPwdDialog = false; newPwd="" } }) { Text("Zapisz") } }, dismissButton = { TextButton({ showPwdDialog = false }) { Text("Anuluj") } })
         }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = { showDeleteAccountDialog = true },
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) {
-            Icon(Icons.Default.DeleteForever, contentDescription = null); Spacer(modifier = Modifier.width(8.dp))
-            Text("Usuń konto")
-        }
-
-        // Dialogi
-        if (showPasswordDialog) {
-            AlertDialog(
-                onDismissRequest = { showPasswordDialog = false; newPassword = "" },
-                title = { Text("Zmiana hasła") },
-                text = { OutlinedTextField(value = newPassword, onValueChange = { newPassword = it }, label = { Text("Nowe hasło") }, visualTransformation = PasswordVisualTransformation(), singleLine = true) },
-                confirmButton = { Button(onClick = { if (newPassword.isNotBlank()) { viewModel.changePassword(newPassword) { Toast.makeText(context, "Hasło zmienione", Toast.LENGTH_SHORT).show(); showPasswordDialog = false; newPassword = "" } } }) { Text("Zapisz") } },
-                dismissButton = { TextButton(onClick = { showPasswordDialog = false }) { Text("Anuluj") } }
-            )
-        }
-
-        if (showDeleteAccountDialog) {
-            AlertDialog(
-                onDismissRequest = { showDeleteAccountDialog = false },
-                title = { Text("Usunąć konto?") },
-                text = { Text("Ta operacja jest nieodwracalna. Wszystkie dane zostaną usunięte.") },
-                confirmButton = { Button(onClick = { viewModel.deleteAccount { showDeleteAccountDialog = false; onLogout(); Toast.makeText(context, "Konto usunięte", Toast.LENGTH_LONG).show() } }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Tak, usuń") } },
-                dismissButton = { TextButton(onClick = { showDeleteAccountDialog = false }) { Text("Anuluj") } }
-            )
+        if (showDelDialog) {
+            AlertDialog(onDismissRequest = { showDelDialog = false }, title = { Text("Usunąć konto?") }, text = { Text("Nieodwracalnie usunie wszystkie notatki.") }, confirmButton = { Button({ viewModel.deleteAccount { showDelDialog = false; onLogout() } }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Usuń") } }, dismissButton = { TextButton({ showDelDialog = false }) { Text("Anuluj") } })
         }
     }
 }
 
-// --- POZOSTAŁE WIDOKI (Notatki i Foldery) ---
 @Composable
 fun NotesView(viewModel: MainViewModel, folderId: Int?) {
-    val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList())
-    else viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
+    val notes by if (folderId != null) viewModel.getNotesFromFolder(folderId).collectAsState(initial = emptyList()) else viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
     val allFolders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
-    val context = LocalContext.current
-    val currentUserPassword = viewModel.currentUser?.password ?: ""
-
-    var showAddDialog by remember { mutableStateOf(false) }
-    var noteToEdit by remember { mutableStateOf<Note?>(null) }
-    var editTitle by remember { mutableStateOf("") }
-    var editContent by remember { mutableStateOf("") }
-    var noteToMove by remember { mutableStateOf<Note?>(null) }
-    var noteToUnlock by remember { mutableStateOf<Note?>(null) }
-    var passwordInput by remember { mutableStateOf("") }
+    var showAdd by remember { mutableStateOf(false) }
     var newTitle by remember { mutableStateOf("") }
     var newContent by remember { mutableStateOf("") }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (notes.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Brak notatek", color = MaterialTheme.colorScheme.secondary) }
-
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize()) {
             items(notes) { note ->
                 val folderName = allFolders.find { it.id == note.folderId }?.name ?: "Ogólne"
-                Card(modifier = Modifier.fillMaxWidth().padding(8.dp), colors = if(note.isLocked) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant) else CardDefaults.cardColors(), elevation = CardDefaults.cardElevation(2.dp)) {
-                    Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = note.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            if (note.isLocked) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)); Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Treść ukryta", fontSize = 14.sp, color = MaterialTheme.colorScheme.secondary, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
-                                }
-                            } else { Text(text = note.content, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary); Spacer(modifier = Modifier.width(4.dp))
-                                Text(text = folderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
-                            }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { if (note.isLocked) noteToUnlock = note else { viewModel.toggleLock(note); Toast.makeText(context, "Zablokowano", Toast.LENGTH_SHORT).show() } }) { Icon(imageVector = if (note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen, contentDescription = "Szyfruj", tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline) }
-                            if (!note.isLocked) {
-                                IconButton(onClick = { noteToEdit = note; editTitle = note.title; editContent = note.content }) { Icon(Icons.Default.Edit, contentDescription = "Edytuj", tint = MaterialTheme.colorScheme.primary) }
-                                IconButton(onClick = { noteToMove = note }) { Icon(Icons.Default.DriveFileMove, contentDescription = "Przenieś", tint = MaterialTheme.colorScheme.secondary) }
-                            }
-                            IconButton(onClick = { viewModel.deleteNote(note) }) { Icon(Icons.Default.Delete, contentDescription = "Usuń", tint = MaterialTheme.colorScheme.error) }
-                        }
-                    }
-                }
+                NoteItem(note, folderName, viewModel)
             }
         }
-
-        FloatingActionButton(onClick = { showAddDialog = true }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.Add, contentDescription = "Dodaj") }
-
-        if (showAddDialog) {
-            AlertDialog(onDismissRequest = { showAddDialog = false }, title = { Text("Nowa notatka") }, text = { Column { OutlinedTextField(value = newTitle, onValueChange = { newTitle = it }, label = { Text("Tytuł") }, singleLine = true); Spacer(modifier = Modifier.height(8.dp)); OutlinedTextField(value = newContent, onValueChange = { newContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button(onClick = { if (newTitle.isNotBlank() || newContent.isNotBlank()) { viewModel.addNote(if(newTitle.isBlank()) "Bez tytułu" else newTitle, newContent, folderId); newTitle = ""; newContent = ""; showAddDialog = false } }) { Text("Zapisz") } }, dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("Anuluj") } })
-        }
-        if (noteToEdit != null) {
-            AlertDialog(onDismissRequest = { noteToEdit = null }, title = { Text("Edytuj") }, text = { Column { OutlinedTextField(value = editTitle, onValueChange = { editTitle = it }, label = { Text("Tytuł") }); Spacer(modifier = Modifier.height(8.dp)); OutlinedTextField(value = editContent, onValueChange = { editContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button(onClick = { viewModel.updateNote(noteToEdit!!.id, if(editTitle.isBlank()) "Bez tytułu" else editTitle, editContent); noteToEdit = null }) { Text("Aktualizuj") } }, dismissButton = { TextButton(onClick = { noteToEdit = null }) { Text("Anuluj") } })
-        }
-        if (noteToMove != null) {
-            AlertDialog(onDismissRequest = { noteToMove = null }, title = { Text("Przenieś do") }, text = { LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) { item { ListItem(headlineContent = { Text("Brak folderu", fontWeight = FontWeight.Bold) }, modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, null); noteToMove = null }); Divider() }; items(allFolders) { folder -> ListItem(headlineContent = { Text(folder.name) }, leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) }, modifier = Modifier.clickable { viewModel.moveNote(noteToMove!!, folder.id); noteToMove = null }) } } }, confirmButton = { TextButton(onClick = { noteToMove = null }) { Text("Anuluj") } })
-        }
-        if (noteToUnlock != null) {
-            AlertDialog(onDismissRequest = { noteToUnlock = null; passwordInput = "" }, title = { Text("Podaj hasło") }, text = { OutlinedTextField(value = passwordInput, onValueChange = { passwordInput = it }, visualTransformation = PasswordVisualTransformation(), label = { Text("Hasło użytkownika") }) }, confirmButton = { Button(onClick = { if (passwordInput == currentUserPassword) { viewModel.toggleLock(noteToUnlock!!); noteToUnlock = null; passwordInput = ""; Toast.makeText(context, "Odblokowano!", Toast.LENGTH_SHORT).show() } else { Toast.makeText(context, "Błędne hasło!", Toast.LENGTH_SHORT).show() } }) { Text("Odszyfruj") } }, dismissButton = { TextButton(onClick = { noteToUnlock = null; passwordInput = "" }) { Text("Anuluj") } })
+        FloatingActionButton({ showAdd = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.Add, null) }
+        if (showAdd) {
+            AlertDialog(onDismissRequest = { showAdd = false }, title = { Text("Nowa notatka") }, text = { Column { OutlinedTextField(newTitle, { newTitle = it }, label = { Text("Tytuł") }); OutlinedTextField(newContent, { newContent = it }, label = { Text("Treść") }, modifier = Modifier.height(100.dp)) } }, confirmButton = { Button({ viewModel.addNote(if(newTitle.isBlank()) "Bez tytułu" else newTitle, newContent, folderId); newTitle=""; newContent=""; showAdd=false }) { Text("Zapisz") } }, dismissButton = { TextButton({ showAdd = false }) { Text("Anuluj") } })
         }
     }
 }
 
 @Composable
-fun FoldersView(viewModel: MainViewModel, onFolderClick: (Folder) -> Unit) {
-    val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
-    var showDialog by remember { mutableStateOf(false) }
-    var folderName by remember { mutableStateOf("") }
+fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
+    val context = LocalContext.current
+    var toUnlock by remember { mutableStateOf(false) }
+    var pwd by remember { mutableStateOf("") }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (folders.isEmpty()) Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Brak folderów", color = MaterialTheme.colorScheme.secondary) }
-        LazyColumn(modifier = Modifier.fillMaxSize()) { items(folders) { folder -> Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onFolderClick(folder) }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) { Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Folder, contentDescription = null); Spacer(modifier = Modifier.width(16.dp)); Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp) }; IconButton(onClick = { viewModel.deleteFolder(folder) }) { Icon(Icons.Default.Delete, contentDescription = null) } } } } }
-        FloatingActionButton(onClick = { showDialog = true }, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = MaterialTheme.colorScheme.secondaryContainer) { Icon(Icons.Default.CreateNewFolder, contentDescription = "Dodaj") }
-        if (showDialog) { AlertDialog(onDismissRequest = { showDialog = false }, title = { Text("Nowy Folder") }, text = { TextField(value = folderName, onValueChange = { folderName = it }) }, confirmButton = { Button(onClick = { if (folderName.isNotBlank()) { viewModel.addFolder(folderName); folderName = ""; showDialog = false } }) { Text("Utwórz") } }, dismissButton = { TextButton(onClick = { showDialog = false }) { Text("Anuluj") } }) }
+    Card(Modifier.fillMaxWidth().padding(8.dp), colors = if(note.isLocked) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant) else CardDefaults.cardColors()) {
+        Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column(Modifier.weight(1f)) {
+                Text(note.title, fontWeight = FontWeight.Bold)
+                if(note.isLocked) Text("Treść ukryta", fontStyle = androidx.compose.ui.text.font.FontStyle.Italic, color = MaterialTheme.colorScheme.secondary) else Text(note.content, maxLines = 2)
+                Text(folderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+            }
+            Column {
+                IconButton({ if(note.isLocked) toUnlock = true else viewModel.toggleLock(note) }) { Icon(if(note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen, null) }
+                if(!note.isLocked) IconButton({ viewModel.deleteNote(note) }) { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
+    if(toUnlock) {
+        AlertDialog(onDismissRequest = { toUnlock = false; pwd="" }, title = { Text("Hasło") }, text = { OutlinedTextField(pwd, { pwd = it }, visualTransformation = PasswordVisualTransformation()) }, confirmButton = { Button({ if(pwd == viewModel.currentUser?.password) { viewModel.toggleLock(note); toUnlock=false; pwd="" } else Toast.makeText(context, "Błąd", Toast.LENGTH_SHORT).show() }) { Text("OK") } }, dismissButton = { TextButton({ toUnlock=false }) { Text("Anuluj") } })
+    }
+}
+
+@Composable
+fun FoldersView(viewModel: MainViewModel, onClick: (Folder) -> Unit) {
+    val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
+    var showAdd by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn { items(folders) { f -> Card(Modifier.fillMaxWidth().padding(8.dp).clickable { onClick(f) }) { Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Text(f.name, fontWeight = FontWeight.Bold); IconButton({ viewModel.deleteFolder(f) }) { Icon(Icons.Default.Delete, null) } } } } }
+        FloatingActionButton({ showAdd = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.CreateNewFolder, null) }
+        if(showAdd) {
+            AlertDialog(onDismissRequest = { showAdd = false }, title = { Text("Nowy Folder") }, text = { OutlinedTextField(name, { name = it }) }, confirmButton = { Button({ if(name.isNotBlank()) { viewModel.addFolder(name); name=""; showAdd=false } }) { Text("OK") } }, dismissButton = { TextButton({ showAdd = false }) { Text("Anuluj") } })
+        }
     }
 }
 
@@ -570,13 +418,51 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // --- ZASTOSOWANIE MOTYWU ---
-            // Pobieramy preferencje usera. Jeśli brak (niezalogowany) -> system
+            val context = LocalContext.current
             val userTheme = viewModel.currentUser?.theme ?: "system"
+
+            // --- LOGIKA OPÓŹNIENIA (DEBOUNCING) DLA SENSORA ---
+            // 1. Surowy odczyt z sensora (zmienia się natychmiast)
+            var rawSensorIsDark by remember { mutableStateOf(false) }
+            // 2. Stabilny stan używany do zmiany motywu (zmienia się po 3s)
+            var finalSensorIsDark by remember { mutableStateOf(false) }
+
+            // Rejestracja sensora
+            if (userTheme == "sensor") {
+                DisposableEffect(Unit) {
+                    val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+                    val lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
+
+                    val listener = object : SensorEventListener {
+                        override fun onSensorChanged(event: SensorEvent?) {
+                            event?.let {
+                                val lux = it.values[0]
+                                viewModel.currentLuxValue = lux
+                                // Natychmiastowa aktualizacja "surowego" stanu
+                                rawSensorIsDark = lux < 20f
+                            }
+                        }
+                        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                    }
+                    sensorManager.registerListener(listener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL)
+                    onDispose { sensorManager.unregisterListener(listener) }
+                }
+
+                // Debouncing: Czekaj 3 sekundy po zmianie rawSensorIsDark zanim zmienisz finalSensorIsDark
+                LaunchedEffect(rawSensorIsDark) {
+                    // Jeśli to pierwsza inicjalizacja (np. zaraz po włączeniu opcji), można pominąć delay,
+                    // ale dla uproszczenia i stabilności czekamy zawsze.
+                    // Funkcja delay zostanie anulowana, jeśli rawSensorIsDark zmieni się ponownie przed upływem czasu.
+                    delay(3000)
+                    finalSensorIsDark = rawSensorIsDark
+                }
+            }
+
             val isDark = when (userTheme) {
                 "light" -> false
                 "dark" -> true
-                else -> isSystemInDarkTheme() // "system"
+                "sensor" -> finalSensorIsDark // Używamy stabilnej, opóźnionej wartości
+                else -> isSystemInDarkTheme()
             }
 
             MaterialTheme(colorScheme = if (isDark) darkColorScheme() else lightColorScheme()) {
@@ -584,10 +470,10 @@ class MainActivity : ComponentActivity() {
 
                 AnimatedContent(
                     targetState = currentScreen,
-                    label = "AppNavigation",
+                    label = "AppNav",
                     transitionSpec = {
-                        if (targetState == ScreenState.APP) (slideInHorizontally { width -> width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(animationSpec = tween(500)))
-                        else (slideInHorizontally { width -> -width } + fadeIn(animationSpec = tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(animationSpec = tween(500)))
+                        if (targetState == ScreenState.APP) (slideInHorizontally { width -> width } + fadeIn(tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(tween(500)))
+                        else (slideInHorizontally { width -> -width } + fadeIn(tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(tween(500)))
                     }
                 ) { screen ->
                     when (screen) {
