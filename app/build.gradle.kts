@@ -42,6 +42,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended") // Ikony (Delete, Add)
+    implementation("androidx.biometric:biometric:1.1.0")
 
     // Baza danych Room
     val room_version = "2.6.1"
