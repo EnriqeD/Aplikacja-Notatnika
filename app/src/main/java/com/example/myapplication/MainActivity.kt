@@ -11,7 +11,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.biometric.BiometricPrompt // WYMAGA IMPORTU
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -43,7 +43,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity // ZMIANA KLASY BAZOWEJ
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.*
@@ -71,15 +71,7 @@ data class Folder(
     val color: String = "white"
 )
 
-@Entity(
-    tableName = "notes",
-    foreignKeys = [ForeignKey(
-        entity = Folder::class,
-        parentColumns = ["id"],
-        childColumns = ["folderId"],
-        onDelete = ForeignKey.CASCADE
-    )]
-)
+@Entity(tableName = "notes")
 data class Note(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val title: String,
@@ -108,7 +100,8 @@ interface AppDao {
     @Query("DELETE FROM folders WHERE ownerUsername = :username")
     suspend fun deleteAllUserFolders(username: String)
 
-    @Query("SELECT * FROM notes WHERE ownerUsername = :username ORDER BY id DESC")
+    // Notatki ukryte (folder -2) nie pokazują się na głównej liście
+    @Query("SELECT * FROM notes WHERE ownerUsername = :username AND (folderId IS NULL OR folderId != -2) ORDER BY id DESC")
     fun getAllNotes(username: String): Flow<List<Note>>
 
     @Query("SELECT * FROM notes WHERE folderId = :folderId AND ownerUsername = :username ORDER BY id DESC")
@@ -141,15 +134,15 @@ interface AppDao {
     suspend fun updateFolder(id: Int, name: String, color: String)
 }
 
-// Wersja 14 (bez zmian w strukturze, ale resetujemy dla pewności)
-@Database(entities = [Note::class, Folder::class, User::class], version = 14, exportSchema = false)
+// Wersja 16
+@Database(entities = [Note::class, Folder::class, User::class], version = 16, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v14")
+                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v16")
                     .fallbackToDestructiveMigration()
                     .build().also { INSTANCE = it }
             }
@@ -168,7 +161,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var currentLuxValue by mutableFloatStateOf(0f)
 
     val FAVORITES_FOLDER_ID = -1
-    val SECURE_FOLDER_ID = -2 // NOWOŚĆ: ID dla folderu szyfrowanego
+    val SECURE_FOLDER_ID = -2
 
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
@@ -201,7 +194,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val user = currentUser ?: return emptyFlow()
         return when (folderId) {
             FAVORITES_FOLDER_ID -> dao.getFavoriteNotes(user.username)
-            SECURE_FOLDER_ID -> dao.getNotesByFolder(SECURE_FOLDER_ID, user.username) // Notatki przypisane do ID -2
+            SECURE_FOLDER_ID -> dao.getNotesByFolder(SECURE_FOLDER_ID, user.username)
             null -> dao.getAllNotes(user.username)
             else -> dao.getNotesByFolder(folderId, user.username)
         }
@@ -209,11 +202,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addNote(title: String, content: String, folderId: Int?) = viewModelScope.launch {
         currentUser?.let { user ->
-            // Obsługa folderów wirtualnych przy dodawaniu
             val realFolderId = if(folderId == FAVORITES_FOLDER_ID) null else folderId
             val isFav = (folderId == FAVORITES_FOLDER_ID)
-
-            // Jeśli dodajemy w folderze szyfrowanym, przypisujemy ID -2
             val finalFolderId = if(folderId == SECURE_FOLDER_ID) SECURE_FOLDER_ID else realFolderId
 
             dao.insertNote(Note(title = title, content = content, folderId = finalFolderId, ownerUsername = user.username, isFavorite = isFav))
@@ -222,7 +212,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateNote(id: Int, t: String, c: String) = viewModelScope.launch { dao.updateNoteContent(id, t, c) }
     fun deleteNote(note: Note) = viewModelScope.launch { dao.deleteNote(note) }
-    fun moveNote(note: Note, fId: Int?) = viewModelScope.launch { dao.updateNoteFolder(note.id, fId) }
+
+    // ZMIANA: Obsługa przenoszenia i bezpieczeństwa
+    fun moveNote(note: Note, fId: Int?) = viewModelScope.launch {
+        // 1. Zmień folder
+        dao.updateNoteFolder(note.id, fId)
+
+        // 2. JEŚLI przenosimy do SZYFROWANE (-2), to usuń z ulubionych (bezpieczeństwo)
+        if (fId == SECURE_FOLDER_ID) {
+            dao.updateNoteFavorite(note.id, false)
+        }
+    }
+
     fun toggleLock(note: Note) = viewModelScope.launch { dao.updateNoteLock(note.id, !note.isLocked) }
     fun toggleFavorite(note: Note) = viewModelScope.launch { dao.updateNoteFavorite(note.id, !note.isFavorite) }
     fun addFolder(name: String, color: String) = viewModelScope.launch { currentUser?.let { dao.insertFolder(Folder(name = name, ownerUsername = it.username, color = color)) } }
@@ -242,7 +243,7 @@ fun getFolderColor(colorName: String): Color {
         "yellow" -> Color(0xFFFFEB3B)
         "orange" -> Color(0xFFFF9800)
         "gold" -> Color(0xFFFFD700)
-        "purple" -> Color(0xFF9C27B0) // Kolor dla folderu szyfrowanego
+        "purple" -> Color(0xFF9C27B0)
         else -> Color.White
     }
 }
@@ -346,7 +347,7 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit, onBiometricReq
                     0 -> NotesView(viewModel, null)
                     1 -> FoldersView(viewModel,
                         onFolderClick = { folderId, name -> activeFolderId = folderId; activeFolderName = name },
-                        onBiometricRequest = onBiometricRequest // Przekazujemy żądanie biometrii
+                        onBiometricRequest = onBiometricRequest
                     )
                     2 -> SettingsView(viewModel, onLogout)
                 }
@@ -453,8 +454,11 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { viewModel.toggleFavorite(note) }) {
-                        Icon(imageVector = if(note.isFavorite) Icons.Default.Star else Icons.Outlined.StarBorder, contentDescription = "Ulubione", tint = if(note.isFavorite) Color(0xFFFFD700) else MaterialTheme.colorScheme.outline)
+                    // ZMIANA: Ukryj gwiazdkę, jeśli notatka jest w folderze SZYFROWANE (-2)
+                    if (note.folderId != viewModel.SECURE_FOLDER_ID) {
+                        IconButton(onClick = { viewModel.toggleFavorite(note) }) {
+                            Icon(imageVector = if(note.isFavorite) Icons.Default.Star else Icons.Outlined.StarBorder, contentDescription = "Ulubione", tint = if(note.isFavorite) Color(0xFFFFD700) else MaterialTheme.colorScheme.outline)
+                        }
                     }
                     IconButton(onClick = { isMenuExpanded = !isMenuExpanded }) { Icon(imageVector = if (isMenuExpanded) Icons.Default.ExpandLess else Icons.Default.MoreVert, contentDescription = "Opcje") }
                 }
@@ -482,7 +486,45 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
             }) { Text("OK") } }, dismissButton = { TextButton({ toUnlock=false }) { Text("Anuluj") } })
     }
     if (toEdit) { AlertDialog(onDismissRequest = { toEdit = false }, title = { Text("Edytuj") }, text = { Column { OutlinedTextField(editTitle, { editTitle = it }, label = { Text("Tytuł") }); Spacer(Modifier.height(8.dp)); OutlinedTextField(editContent, { editContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button({ viewModel.updateNote(note.id, if(editTitle.isBlank()) "Bez tytułu" else editTitle, editContent); toEdit = false }) { Text("Zapisz") } }, dismissButton = { TextButton({ toEdit = false }) { Text("Anuluj") } }) }
-    if (toMove) { AlertDialog(onDismissRequest = { toMove = false }, title = { Text("Przenieś do") }, text = { LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) { item { ListItem(headlineContent = { Text("Brak folderu", fontWeight = FontWeight.Bold) }, modifier = Modifier.clickable { viewModel.moveNote(note, null); toMove = false }); Divider() }; items(allFolders) { folder -> ListItem(headlineContent = { Text(folder.name) }, leadingContent = { Icon(Icons.Default.Folder, null) }, modifier = Modifier.clickable { viewModel.moveNote(note, folder.id); toMove = false }) } } }, confirmButton = { TextButton({ toMove = false }) { Text("Anuluj") } }) }
+
+    if (toMove) {
+        AlertDialog(
+            onDismissRequest = { toMove = false },
+            title = { Text("Przenieś do") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                    item {
+                        ListItem(
+                            headlineContent = { Text("Brak folderu (Ogólne)", fontWeight = FontWeight.Bold) },
+                            modifier = Modifier.clickable { viewModel.moveNote(note, null); toMove = false }
+                        )
+                        Divider()
+                    }
+                    item {
+                        ListItem(
+                            headlineContent = { Text("SZYFROWANE", fontWeight = FontWeight.Bold, color = Color(0xFF9C27B0)) },
+                            leadingContent = { Icon(Icons.Default.Lock, null, tint = Color(0xFF9C27B0)) },
+                            modifier = Modifier.clickable {
+                                viewModel.moveNote(note, viewModel.SECURE_FOLDER_ID)
+                                toMove = false
+                            }
+                        )
+                        Divider()
+                    }
+                    items(allFolders) { folder ->
+                        if (folder.id != viewModel.FAVORITES_FOLDER_ID && folder.id != viewModel.SECURE_FOLDER_ID) {
+                            ListItem(
+                                headlineContent = { Text(folder.name) },
+                                leadingContent = { Icon(Icons.Default.Folder, null) },
+                                modifier = Modifier.clickable { viewModel.moveNote(note, folder.id); toMove = false }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton({ toMove = false }) { Text("Anuluj") } }
+        )
+    }
 }
 
 @Composable
@@ -497,25 +539,13 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Int, String) -> Unit, 
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn {
-            // 1. Folder Ulubione
             if (hasFavorites) { item { val favFolder = Folder(id = viewModel.FAVORITES_FOLDER_ID, name = "Ulubione", ownerUsername = "", color = "gold"); FolderItem(favFolder, viewModel, onClick = { onFolderClick(it.id, it.name) }) } }
 
-            // 2. NOWOŚĆ: Folder SZYFROWANE (Zawsze widoczny)
             item {
                 val secureFolder = Folder(id = viewModel.SECURE_FOLDER_ID, name = "SZYFROWANE", ownerUsername = "", color = "purple")
-                FolderItem(
-                    folder = secureFolder,
-                    viewModel = viewModel,
-                    onClick = {
-                        // Zamiast od razu otwierać, żądamy biometrii
-                        onBiometricRequest {
-                            onFolderClick(secureFolder.id, secureFolder.name)
-                        }
-                    }
-                )
+                FolderItem(folder = secureFolder, viewModel = viewModel, onClick = { onBiometricRequest { onFolderClick(secureFolder.id, secureFolder.name) } })
             }
 
-            // 3. Reszta folderów
             items(folders) { f -> FolderItem(f, viewModel, onClick = { onFolderClick(it.id, it.name) }) }
         }
         FloatingActionButton({ showAdd = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.CreateNewFolder, null) }
@@ -542,19 +572,13 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
     val contentColor = getContentColorForFolder(folder.color)
     val isVirtualFavorites = (folder.id == viewModel.FAVORITES_FOLDER_ID)
     val isSecure = (folder.id == viewModel.SECURE_FOLDER_ID)
-
-    // Folderów systemowych (Ulubione, Szyfrowane) nie można edytować/usuwać
     val isSystemFolder = isVirtualFavorites || isSecure
 
     Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onClick(folder) }, colors = CardDefaults.cardColors(containerColor = backgroundColor)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val icon = when {
-                        isVirtualFavorites -> Icons.Default.Star
-                        isSecure -> Icons.Default.Lock // Kłódka dla szyfrowanego
-                        else -> Icons.Default.Folder
-                    }
+                    val icon = when { isVirtualFavorites -> Icons.Default.Star; isSecure -> Icons.Default.Lock; else -> Icons.Default.Folder }
                     Icon(icon, null, tint = contentColor)
                     Spacer(modifier = Modifier.width(16.dp))
                     Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = contentColor)
@@ -588,35 +612,18 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
 
 enum class ScreenState { LOGIN, REGISTER, APP }
 
-// ZMIANA: MainActivity dziedziczy po FragmentActivity dla Biometrii
 class MainActivity : FragmentActivity() {
     private val viewModel by viewModels<MainViewModel>()
 
-    // Funkcja wywołująca biometrię
     private fun authenticateUser(onSuccess: () -> Unit) {
         val executor = ContextCompat.getMainExecutor(this)
         val biometricPrompt = BiometricPrompt(this, executor,
             object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    onSuccess()
-                }
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    Toast.makeText(applicationContext, "Błąd: $errString", Toast.LENGTH_SHORT).show()
-                }
-                override fun onAuthenticationFailed() {
-                    super.onAuthenticationFailed()
-                    Toast.makeText(applicationContext, "Nie rozpoznano odcisku", Toast.LENGTH_SHORT).show()
-                }
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) { super.onAuthenticationSucceeded(result); onSuccess() }
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) { super.onAuthenticationError(errorCode, errString); Toast.makeText(applicationContext, "Błąd: $errString", Toast.LENGTH_SHORT).show() }
+                override fun onAuthenticationFailed() { super.onAuthenticationFailed(); Toast.makeText(applicationContext, "Nie rozpoznano odcisku", Toast.LENGTH_SHORT).show() }
             })
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Dostęp do folderu SZYFROWANE")
-            .setSubtitle("Potwierdź tożsamość odciskiem palca")
-            .setNegativeButtonText("Anuluj")
-            .build()
-
+        val promptInfo = BiometricPrompt.PromptInfo.Builder().setTitle("Dostęp do folderu SZYFROWANE").setSubtitle("Potwierdź tożsamość odciskiem palca").setNegativeButtonText("Anuluj").build()
         biometricPrompt.authenticate(promptInfo)
     }
 
@@ -650,7 +657,7 @@ class MainActivity : FragmentActivity() {
                         ScreenState.APP -> MainAppScreen(
                             viewModel = viewModel,
                             onLogout = { viewModel.logout(); currentScreen = ScreenState.LOGIN },
-                            onBiometricRequest = { successCallback -> authenticateUser(successCallback) } // Przekazujemy funkcję
+                            onBiometricRequest = { successCallback -> authenticateUser(successCallback) }
                         )
                     }
                 }
