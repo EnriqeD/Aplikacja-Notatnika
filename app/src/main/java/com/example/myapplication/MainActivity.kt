@@ -53,16 +53,73 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 
 // ==========================================
-// 1. BAZA DANYCH
+// 0. LOGIKA SZYFRU CEZARA (Automatyczna)
 // ==========================================
 
+/**
+ * Obiekt narzędziowy odpowiedzialny za logikę szyfrowania notatek.
+ * Implementuje zmodyfikowany Szyfr Cezara, który jako klucz przesunięcia
+ * wykorzystuje skrót (hash) hasła użytkownika.
+ */
+object CipherUtils {
+    // Definiujemy własny alfabet, aby obsłużyć polskie znaki, cyfry i podstawową interpunkcję.
+    // Znaki spoza tego zestawu nie będą szyfrowane.
+    private const val ALPHABET = "aąbcćdeęfghijklłmnńoóprsśtuwyzźżAĄBCĆDEĘFGHIJKLŁMNŃOÓPRSŚTUWYZŹŻ0123456789 .,!?-+@#()"
+
+    /**
+     * Szyfruje lub deszyfruje tekst metodą Cezara.
+     *
+     * @param text Tekst wejściowy (jawny lub zaszyfrowany).
+     * @param keyHasło Hasło użytkownika, służące do wygenerowania unikalnego przesunięcia.
+     * @param encrypt Jeśli true -> szyfrujemy (przesunięcie w prawo). Jeśli false -> deszyfrujemy (w lewo).
+     * @return Przetworzony tekst.
+     */
+    fun caesarAuto(text: String, keyHasło: String, encrypt: Boolean): String {
+        // Wyliczamy przesunięcie na podstawie hasła.
+        // HashCode zamienia dowolny ciąg znaków na liczbę całkowitą.
+        val shiftRaw = keyHasło.hashCode()
+
+        // Ustalamy kierunek przesunięcia (+ dla szyfrowania, - dla deszyfrowania)
+        val shift = if (encrypt) shiftRaw else -shiftRaw
+
+        val len = ALPHABET.length
+        // Normalizacja przesunięcia (modulo), aby mieściło się w zakresie długości alfabetu
+        // i działało poprawnie dla liczb ujemnych.
+        val normalizedShift = ((shift % len) + len) % len
+
+        return text.map { char ->
+            val index = ALPHABET.indexOf(char)
+            if (index != -1) {
+                // Oblicz nową pozycję w alfabecie
+                val newIndex = (index + normalizedShift) % len
+                ALPHABET[newIndex]
+            } else {
+                // Jeśli znaku nie ma w naszym alfabecie (np. emoji), zostawiamy go bez zmian
+                char
+            }
+        }.joinToString("")
+    }
+}
+
+// ==========================================
+// 1. BAZA DANYCH (Encje i DAO)
+// ==========================================
+
+/**
+ * Tabela użytkowników.
+ * Przechowuje login, hasło (w tym przypadku w formie jawnej dla potrzeb logiki Cezara) oraz motyw.
+ */
 @Entity(tableName = "users")
 data class User(
     @PrimaryKey val username: String,
-    val password: String,
+    val password: String, // Hasło używane jako klucz do szyfru Cezara
     val theme: String = "system"
 )
 
+/**
+ * Tabela folderów.
+ * Foldery grupują notatki. Folder o ID -1 (Ulubione) i -2 (Szyfrowane) są wirtualne i nie są tu zapisywane.
+ */
 @Entity(tableName = "folders")
 data class Folder(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -71,6 +128,13 @@ data class Folder(
     val color: String = "white"
 )
 
+/**
+ * Tabela notatek.
+ * Główna encja przechowująca treść.
+ * * @property content Treść notatki. Jeśli isLocked=true, to pole zawiera bełkot (tekst po szyfrze Cezara).
+ * @property folderId ID folderu. Może przyjmować wartości specjalne: -2 dla folderu Szyfrowane.
+ * @property isLocked Flaga informująca, czy treść w polu 'content' jest zaszyfrowana.
+ */
 @Entity(tableName = "notes")
 data class Note(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -82,28 +146,42 @@ data class Note(
     val isFavorite: Boolean = false
 )
 
+/**
+ * Interfejs dostępu do danych (Data Access Object).
+ * Zawiera zapytania SQL do komunikacji z bazą.
+ */
 @Dao
 interface AppDao {
+    // --- UŻYTKOWNIK ---
     @Query("SELECT * FROM users WHERE username = :username LIMIT 1")
     suspend fun getUser(username: String): User?
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertUser(user: User)
+
     @Query("UPDATE users SET password = :newPassword WHERE username = :username")
     suspend fun updateUserPassword(username: String, newPassword: String)
+
     @Query("UPDATE users SET theme = :theme WHERE username = :username")
     suspend fun updateUserTheme(username: String, theme: String)
+
     @Query("DELETE FROM users WHERE username = :username")
     suspend fun deleteUser(username: String)
 
+    // --- CZYSZCZENIE DANYCH PRZY USUWANIU KONTA ---
     @Query("DELETE FROM notes WHERE ownerUsername = :username")
     suspend fun deleteAllUserNotes(username: String)
     @Query("DELETE FROM folders WHERE ownerUsername = :username")
     suspend fun deleteAllUserFolders(username: String)
 
-    // Notatki ukryte (folder -2) nie pokazują się na głównej liście
+    // --- NOTATKI ---
+
+    // Pobiera wszystkie notatki, ALE wyklucza te z folderu Szyfrowane (ID -2).
+    // Dzięki temu tajne notatki nie pojawiają się na głównej liście "Wszystkie notatki".
     @Query("SELECT * FROM notes WHERE ownerUsername = :username AND (folderId IS NULL OR folderId != -2) ORDER BY id DESC")
     fun getAllNotes(username: String): Flow<List<Note>>
 
+    // Pobiera notatki z konkretnego folderu (używane też do folderu Szyfrowane, gdzie folderId = -2)
     @Query("SELECT * FROM notes WHERE folderId = :folderId AND ownerUsername = :username ORDER BY id DESC")
     fun getNotesByFolder(folderId: Int, username: String): Flow<List<Note>>
 
@@ -117,13 +195,19 @@ interface AppDao {
 
     @Query("UPDATE notes SET title = :title, content = :content WHERE id = :id")
     suspend fun updateNoteContent(id: Int, title: String, content: String)
+
     @Query("UPDATE notes SET folderId = :folderId WHERE id = :noteId")
     suspend fun updateNoteFolder(noteId: Int, folderId: Int?)
-    @Query("UPDATE notes SET isLocked = :isLocked WHERE id = :noteId")
-    suspend fun updateNoteLock(noteId: Int, isLocked: Boolean)
+
+    // Aktualizacja stanu blokady. Jednocześnie aktualizujemy treść (zaszyfrowaną/odszyfrowaną)
+    // oraz flagę ulubionych (by usunąć z ulubionych przy szyfrowaniu).
+    @Query("UPDATE notes SET isLocked = :isLocked, content = :content, isFavorite = :isFavorite WHERE id = :noteId")
+    suspend fun updateNoteLockAndContent(noteId: Int, isLocked: Boolean, content: String, isFavorite: Boolean)
+
     @Query("UPDATE notes SET isFavorite = :isFavorite WHERE id = :noteId")
     suspend fun updateNoteFavorite(noteId: Int, isFavorite: Boolean)
 
+    // --- FOLDERY ---
     @Query("SELECT * FROM folders WHERE ownerUsername = :username ORDER BY id DESC")
     fun getAllFolders(username: String): Flow<List<Folder>>
     @Insert
@@ -134,16 +218,18 @@ interface AppDao {
     suspend fun updateFolder(id: Int, name: String, color: String)
 }
 
-// Wersja 16
-@Database(entities = [Note::class, Folder::class, User::class], version = 16, exportSchema = false)
+/**
+ * Główna baza danych. Wersja 19.
+ */
+@Database(entities = [Note::class, Folder::class, User::class], version = 19, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): AppDao
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v16")
-                    .fallbackToDestructiveMigration()
+                Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "notes_app_v19")
+                    .fallbackToDestructiveMigration() // Resetuje bazę przy zmianie wersji
                     .build().also { INSTANCE = it }
             }
         }
@@ -151,17 +237,24 @@ abstract class AppDatabase : RoomDatabase() {
 }
 
 // ==========================================
-// 2. VIEWMODEL
+// 2. VIEWMODEL (Logika Biznesowa)
 // ==========================================
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.getDatabase(application).dao()
+
+    // Stan zalogowanego użytkownika
     var currentUser by mutableStateOf<User?>(null)
         private set
+
+    // Stan czujnika światła
     var currentLuxValue by mutableFloatStateOf(0f)
 
+    // Stałe ID dla folderów wirtualnych
     val FAVORITES_FOLDER_ID = -1
     val SECURE_FOLDER_ID = -2
+
+    // --- Uwierzytelnianie ---
 
     fun registerUser(user: User, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         try {
@@ -172,30 +265,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loginUser(username: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) = viewModelScope.launch {
         val user = dao.getUser(username)
+        // Proste porównanie haseł (tekst jawny wymagany do Cezara)
         if (user != null && user.password == password) { currentUser = user; onSuccess() }
         else onError("Błędny login lub hasło!")
     }
 
     fun logout() { currentUser = null }
-    fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch {
-        currentUser?.let { user -> dao.updateUserPassword(user.username, newPassword); currentUser = user.copy(password = newPassword); onSuccess() }
-    }
-    fun changeTheme(newTheme: String) = viewModelScope.launch {
-        currentUser?.let { user -> dao.updateUserTheme(user.username, newTheme); currentUser = user.copy(theme = newTheme) }
-    }
-    fun deleteAccount(onSuccess: () -> Unit) = viewModelScope.launch {
-        currentUser?.let { user -> dao.deleteAllUserNotes(user.username); dao.deleteAllUserFolders(user.username); dao.deleteUser(user.username); currentUser = null; onSuccess() }
-    }
+
+    // --- Zarządzanie danymi ---
 
     fun getAllNotesForCurrentUser() = currentUser?.let { dao.getAllNotes(it.username) } ?: emptyFlow()
     fun getAllFoldersForCurrentUser() = currentUser?.let { dao.getAllFolders(it.username) } ?: emptyFlow()
 
+    /**
+     * Zwraca odpowiedni strumień notatek w zależności od wybranego folderu.
+     * Obsługuje logikę folderów wirtualnych (Ulubione, Szyfrowane).
+     */
     fun getNotesByContext(folderId: Int?): Flow<List<Note>> {
         val user = currentUser ?: return emptyFlow()
         return when (folderId) {
             FAVORITES_FOLDER_ID -> dao.getFavoriteNotes(user.username)
             SECURE_FOLDER_ID -> dao.getNotesByFolder(SECURE_FOLDER_ID, user.username)
-            null -> dao.getAllNotes(user.username)
+            null -> dao.getAllNotes(user.username) // null oznacza "Wszystkie notatki" (bez szyfrowanych)
             else -> dao.getNotesByFolder(folderId, user.username)
         }
     }
@@ -213,26 +304,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateNote(id: Int, t: String, c: String) = viewModelScope.launch { dao.updateNoteContent(id, t, c) }
     fun deleteNote(note: Note) = viewModelScope.launch { dao.deleteNote(note) }
 
-    // ZMIANA: Obsługa przenoszenia i bezpieczeństwa
+    /**
+     * Przenosi notatkę do innego folderu.
+     * Jeśli notatka trafia do folderu Szyfrowane (-2), automatycznie usuwamy ją z Ulubionych dla bezpieczeństwa.
+     */
     fun moveNote(note: Note, fId: Int?) = viewModelScope.launch {
-        // 1. Zmień folder
         dao.updateNoteFolder(note.id, fId)
-
-        // 2. JEŚLI przenosimy do SZYFROWANE (-2), to usuń z ulubionych (bezpieczeństwo)
         if (fId == SECURE_FOLDER_ID) {
             dao.updateNoteFavorite(note.id, false)
         }
     }
 
-    fun toggleLock(note: Note) = viewModelScope.launch { dao.updateNoteLock(note.id, !note.isLocked) }
+    /**
+     * Główna funkcja szyfrująca/deszyfrująca notatkę (Toggle).
+     * Wykorzystuje hasło użytkownika jako klucz do Szyfru Cezara.
+     */
+    fun toggleLock(note: Note) = viewModelScope.launch {
+        currentUser?.let { user ->
+            val passwordKey = user.password // Hasło to klucz
+
+            if (note.isLocked) {
+                // ODBLOKOWYWANIE:
+                // Notatka jest zaszyfrowana (isLocked=true).
+                // Używamy encrypt=false, aby odwrócić przesunięcie Cezara i przywrócić czytelny tekst.
+                val decryptedContent = CipherUtils.caesarAuto(note.content, passwordKey, encrypt = false)
+                dao.updateNoteLockAndContent(note.id, false, decryptedContent, note.isFavorite)
+            } else {
+                // BLOKOWANIE:
+                // Notatka jest jawna. Szyfrujemy ją (encrypt=true).
+                // Dodatkowo ustawiamy isFavorite=false, aby zniknęła z listy ulubionych.
+                val encryptedContent = CipherUtils.caesarAuto(note.content, passwordKey, encrypt = true)
+                dao.updateNoteLockAndContent(note.id, true, encryptedContent, false)
+            }
+        }
+    }
+
     fun toggleFavorite(note: Note) = viewModelScope.launch { dao.updateNoteFavorite(note.id, !note.isFavorite) }
+
+    // --- Zarządzanie folderami i kontem ---
     fun addFolder(name: String, color: String) = viewModelScope.launch { currentUser?.let { dao.insertFolder(Folder(name = name, ownerUsername = it.username, color = color)) } }
     fun updateFolder(id: Int, name: String, color: String) = viewModelScope.launch { dao.updateFolder(id, name, color) }
     fun deleteFolder(folder: Folder) = viewModelScope.launch { dao.deleteFolder(folder) }
+    fun changePassword(newPassword: String, onSuccess: () -> Unit) = viewModelScope.launch { currentUser?.let { user -> dao.updateUserPassword(user.username, newPassword); currentUser = user.copy(password = newPassword); onSuccess() } }
+    fun changeTheme(newTheme: String) = viewModelScope.launch { currentUser?.let { user -> dao.updateUserTheme(user.username, newTheme); currentUser = user.copy(theme = newTheme) } }
+    fun deleteAccount(onSuccess: () -> Unit) = viewModelScope.launch { currentUser?.let { user -> dao.deleteAllUserNotes(user.username); dao.deleteAllUserFolders(user.username); dao.deleteUser(user.username); currentUser = null; onSuccess() } }
 }
 
 // ==========================================
-// 3. UI Helpers
+// 3. UI Helpers (Pomocnicze funkcje UI)
 // ==========================================
 
 fun getFolderColor(colorName: String): Color {
@@ -243,13 +362,15 @@ fun getFolderColor(colorName: String): Color {
         "yellow" -> Color(0xFFFFEB3B)
         "orange" -> Color(0xFFFF9800)
         "gold" -> Color(0xFFFFD700)
-        "purple" -> Color(0xFF9C27B0)
+        "purple" -> Color(0xFF9C27B0) // Kolor dla Szyfrowanych
         else -> Color.White
     }
 }
+
 fun getContentColorForFolder(colorName: String): Color {
     return when(colorName) { "black", "blue", "purple" -> Color.White; else -> Color.Black }
 }
+
 @Composable
 fun ColorPicker(selectedColor: String, onColorSelected: (String) -> Unit) {
     val colors = listOf("white", "black", "blue", "green", "yellow", "orange")
@@ -261,7 +382,7 @@ fun ColorPicker(selectedColor: String, onColorSelected: (String) -> Unit) {
 }
 
 // ==========================================
-// 4. EKRANY
+// 4. EKRANY (Interfejs Użytkownika)
 // ==========================================
 
 @Composable
@@ -316,6 +437,7 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit, onBiometricReq
     var activeFolderId by remember { mutableStateOf<Int?>(null) }
     var activeFolderName by remember { mutableStateOf("") }
 
+    // Obsługa przycisku wstecz (wyjście z folderu)
     BackHandler(enabled = activeFolderId != null) { activeFolderId = null }
 
     Scaffold(
@@ -331,6 +453,7 @@ fun MainAppScreen(viewModel: MainViewModel, onLogout: () -> Unit, onBiometricReq
             )
         },
         bottomBar = {
+            // Dolny pasek nawigacji (tylko na głównym ekranie)
             if (activeFolderId == null) {
                 NavigationBar {
                     NavigationBarItem(icon = { Icon(Icons.Default.Description, null) }, label = { Text("Notatki") }, selected = selectedTab == 0, onClick = { selectedTab = 0 })
@@ -370,6 +493,8 @@ fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         Text("Użytkownik: ${viewModel.currentUser?.username}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(24.dp)); Divider(); Spacer(Modifier.height(16.dp))
+
+        // --- SEKCJA MOTYWU ---
         Text("Motyw aplikacji", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         val themes = listOf("system" to "Systemowy", "light" to "Jasny", "dark" to "Ciemny", "sensor" to "Automatyczny (Czujnik)")
@@ -385,9 +510,13 @@ fun SettingsView(viewModel: MainViewModel, onLogout: () -> Unit) {
             }
         }
         Spacer(Modifier.height(24.dp)); Divider(); Spacer(Modifier.height(24.dp))
+
+        // --- PRZYCISKI AKCJI ---
         OutlinedButton({ showPwdDialog = true }, Modifier.fillMaxWidth().height(50.dp)) { Text("Zmień hasło") }
         Spacer(Modifier.height(16.dp))
         Button({ showDelDialog = true }, Modifier.fillMaxWidth().height(50.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Usuń konto") }
+
+        // --- DIALOGI ---
         if (showPwdDialog) { AlertDialog(onDismissRequest = { showPwdDialog = false }, title = { Text("Zmiana hasła") }, text = { OutlinedTextField(newPwd, { newPwd = it }, label = { Text("Nowe hasło") }) }, confirmButton = { Button({ if(newPwd.isNotBlank()) viewModel.changePassword(newPwd) { showPwdDialog = false; newPwd="" } }) { Text("Zapisz") } }, dismissButton = { TextButton({ showPwdDialog = false }) { Text("Anuluj") } }) }
         if (showDelDialog) { AlertDialog(onDismissRequest = { showDelDialog = false }, title = { Text("Usunąć konto?") }, text = { Text("Nieodwracalnie usunie wszystkie notatki.") }, confirmButton = { Button({ viewModel.deleteAccount { showDelDialog = false; onLogout() } }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Usuń") } }, dismissButton = { TextButton({ showDelDialog = false }) { Text("Anuluj") } }) }
     }
@@ -442,32 +571,39 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(note.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(4.dp))
+
+                    // Logika wyświetlania treści: Jeśli zablokowana -> Pokaż komunikat o szyfrowaniu Cezara
                     if (note.isLocked) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Treść ukryta", fontStyle = androidx.compose.ui.text.font.FontStyle.Italic, color = MaterialTheme.colorScheme.secondary, fontSize = 14.sp)
+                            Text("Treść ukryta (Cezar)", fontStyle = androidx.compose.ui.text.font.FontStyle.Italic, color = MaterialTheme.colorScheme.secondary, fontSize = 14.sp)
                         }
                     } else { Text(note.content, style = MaterialTheme.typography.bodyMedium, maxLines = 10) }
+
                     Spacer(Modifier.height(8.dp))
                     Text(folderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // ZMIANA: Ukryj gwiazdkę, jeśli notatka jest w folderze SZYFROWANE (-2)
+                    // Gwiazdka (Ulubione) - Ukryta jeśli notatka jest w folderze Szyfrowane
                     if (note.folderId != viewModel.SECURE_FOLDER_ID) {
                         IconButton(onClick = { viewModel.toggleFavorite(note) }) {
                             Icon(imageVector = if(note.isFavorite) Icons.Default.Star else Icons.Outlined.StarBorder, contentDescription = "Ulubione", tint = if(note.isFavorite) Color(0xFFFFD700) else MaterialTheme.colorScheme.outline)
                         }
                     }
+                    // Menu opcji
                     IconButton(onClick = { isMenuExpanded = !isMenuExpanded }) { Icon(imageVector = if (isMenuExpanded) Icons.Default.ExpandLess else Icons.Default.MoreVert, contentDescription = "Opcje") }
                 }
             }
+            // Rozwijane menu opcji
             AnimatedVisibility(visible = isMenuExpanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                 Column {
                     Divider(modifier = Modifier.padding(vertical = 8.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        // Przycisk Szyfrowania/Deszyfrowania (Cezar)
                         IconButton(onClick = { if (note.isLocked) toUnlock = true else viewModel.toggleLock(note) }) { Icon(imageVector = if (note.isLocked) Icons.Default.Lock else Icons.Default.LockOpen, contentDescription = "Szyfruj", tint = if (note.isLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline) }
+
                         if (!note.isLocked) {
                             IconButton(onClick = { editTitle = note.title; editContent = note.content; toEdit = true }) { Icon(Icons.Default.Edit, "Edytuj", tint = MaterialTheme.colorScheme.primary) }
                             IconButton(onClick = { toMove = true }) { Icon(Icons.Default.DriveFileMove, "Przenieś", tint = MaterialTheme.colorScheme.secondary) }
@@ -478,6 +614,8 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
             }
         }
     }
+
+    // Dialog potwierdzenia hasła (przy odblokowywaniu)
     if(toUnlock) {
         AlertDialog(onDismissRequest = { toUnlock = false; pwd="" }, title = { Text("Hasło") }, text = { OutlinedTextField(pwd, { pwd = it }, visualTransformation = PasswordVisualTransformation(), label = { Text("Hasło użytkownika") }) },
             confirmButton = { Button({
@@ -485,8 +623,10 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
                 else Toast.makeText(context, "Błędne hasło", Toast.LENGTH_SHORT).show()
             }) { Text("OK") } }, dismissButton = { TextButton({ toUnlock=false }) { Text("Anuluj") } })
     }
+
     if (toEdit) { AlertDialog(onDismissRequest = { toEdit = false }, title = { Text("Edytuj") }, text = { Column { OutlinedTextField(editTitle, { editTitle = it }, label = { Text("Tytuł") }); Spacer(Modifier.height(8.dp)); OutlinedTextField(editContent, { editContent = it }, label = { Text("Treść") }, modifier = Modifier.height(150.dp)) } }, confirmButton = { Button({ viewModel.updateNote(note.id, if(editTitle.isBlank()) "Bez tytułu" else editTitle, editContent); toEdit = false }) { Text("Zapisz") } }, dismissButton = { TextButton({ toEdit = false }) { Text("Anuluj") } }) }
 
+    // Dialog przenoszenia notatki
     if (toMove) {
         AlertDialog(
             onDismissRequest = { toMove = false },
@@ -527,8 +667,16 @@ fun NoteItem(note: Note, folderName: String, viewModel: MainViewModel) {
     }
 }
 
+/**
+ * Ekran wyświetlający listę folderów.
+ * Zawiera wirtualne foldery (Ulubione, Szyfrowane) oraz foldery użytkownika.
+ */
 @Composable
-fun FoldersView(viewModel: MainViewModel, onFolderClick: (Int, String) -> Unit, onBiometricRequest: (onSuccess: () -> Unit) -> Unit) {
+fun FoldersView(
+    viewModel: MainViewModel,
+    onFolderClick: (Int, String) -> Unit,
+    onBiometricRequest: (onSuccess: () -> Unit) -> Unit
+) {
     val folders by viewModel.getAllFoldersForCurrentUser().collectAsState(initial = emptyList())
     val allNotes by viewModel.getAllNotesForCurrentUser().collectAsState(initial = emptyList())
     val hasFavorites = allNotes.any { it.isFavorite }
@@ -539,13 +687,16 @@ fun FoldersView(viewModel: MainViewModel, onFolderClick: (Int, String) -> Unit, 
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn {
+            // 1. Folder Ulubione (Widoczny tylko jeśli są jakieś ulubione notatki)
             if (hasFavorites) { item { val favFolder = Folder(id = viewModel.FAVORITES_FOLDER_ID, name = "Ulubione", ownerUsername = "", color = "gold"); FolderItem(favFolder, viewModel, onClick = { onFolderClick(it.id, it.name) }) } }
 
+            // 2. Folder SZYFROWANE (Zawsze widoczny, wymaga biometrii)
             item {
                 val secureFolder = Folder(id = viewModel.SECURE_FOLDER_ID, name = "SZYFROWANE", ownerUsername = "", color = "purple")
                 FolderItem(folder = secureFolder, viewModel = viewModel, onClick = { onBiometricRequest { onFolderClick(secureFolder.id, secureFolder.name) } })
             }
 
+            // 3. Foldery użytkownika
             items(folders) { f -> FolderItem(f, viewModel, onClick = { onFolderClick(it.id, it.name) }) }
         }
         FloatingActionButton({ showAdd = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp)) { Icon(Icons.Default.CreateNewFolder, null) }
@@ -583,6 +734,7 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
                     Spacer(modifier = Modifier.width(16.dp))
                     Text(folder.name, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = contentColor)
                 }
+                // Menu tylko dla folderów użytkownika
                 if (!isSystemFolder) {
                     IconButton(onClick = { isMenuExpanded = !isMenuExpanded }) { Icon(imageVector = if (isMenuExpanded) Icons.Default.ExpandLess else Icons.Default.MoreVert, contentDescription = "Opcje", tint = contentColor) }
                 }
@@ -610,11 +762,17 @@ fun FolderItem(folder: Folder, viewModel: MainViewModel, onClick: (Folder) -> Un
     }
 }
 
+// ==========================================
+// 5. GŁÓWNA AKTYWNOŚĆ
+// ==========================================
+
 enum class ScreenState { LOGIN, REGISTER, APP }
 
+// Klasa musi dziedziczyć po FragmentActivity, aby obsługiwać BiometricPrompt
 class MainActivity : FragmentActivity() {
     private val viewModel by viewModels<MainViewModel>()
 
+    // Funkcja wywołująca systemowy monit biometryczny (odcisk palca / twarz)
     private fun authenticateUser(onSuccess: () -> Unit) {
         val executor = ContextCompat.getMainExecutor(this)
         val biometricPrompt = BiometricPrompt(this, executor,
@@ -632,8 +790,11 @@ class MainActivity : FragmentActivity() {
         setContent {
             val context = LocalContext.current
             val userTheme = viewModel.currentUser?.theme ?: "system"
+
+            // Logika Debouncingu dla czujnika światła (opóźnienie zmiany motywu)
             var rawSensorIsDark by remember { mutableStateOf(false) }
             var finalSensorIsDark by remember { mutableStateOf(false) }
+
             if (userTheme == "sensor") {
                 DisposableEffect(Unit) {
                     val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -645,11 +806,15 @@ class MainActivity : FragmentActivity() {
                     sensorManager.registerListener(listener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL)
                     onDispose { sensorManager.unregisterListener(listener) }
                 }
+                // Czekaj 3 sekundy na stabilizację odczytu
                 LaunchedEffect(rawSensorIsDark) { delay(3000); finalSensorIsDark = rawSensorIsDark }
             }
+
             val isDark = when (userTheme) { "light" -> false; "dark" -> true; "sensor" -> finalSensorIsDark; else -> isSystemInDarkTheme() }
+
             MaterialTheme(colorScheme = if (isDark) darkColorScheme() else lightColorScheme()) {
                 var currentScreen by remember { mutableStateOf(ScreenState.LOGIN) }
+                // Animacja przejścia między ekranami
                 AnimatedContent(targetState = currentScreen, label = "AppNav", transitionSpec = { if (targetState == ScreenState.APP) (slideInHorizontally { width -> width } + fadeIn(tween(500))).togetherWith(slideOutHorizontally { width -> -width } + fadeOut(tween(500))) else (slideInHorizontally { width -> -width } + fadeIn(tween(500))).togetherWith(slideOutHorizontally { width -> width } + fadeOut(tween(500))) }) { screen ->
                     when (screen) {
                         ScreenState.LOGIN -> LoginScreen(viewModel, { currentScreen = ScreenState.APP }, { currentScreen = ScreenState.REGISTER })
